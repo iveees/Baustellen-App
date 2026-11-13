@@ -1,0 +1,25 @@
+{
+  "name": "baustellen-doku",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Baustellen-Doku: Fotos, Sprechen, Mails an Handwerker, Ablage in Dropbox",
+  "scripts": {
+    "sync": "cap sync android"
+  },
+  "dependencies": {
+    "@capacitor-community/speech-recognition": "6.0.1",
+    "@capacitor/android": "6.1.2",
+    "@capacitor/app": "6.0.1",
+    "@capacitor/browser": "6.0.2",
+    "@capacitor/camera": "6.0.2",
+    "@capacitor/core": "6.1.2",
+    "@capacitor/filesystem": "6.0.1",
+    "@capacitor/network": "6.0.2",
+    "@capacitor/preferences": "6.0.2",
+    "jspdf": "2.5.1",
+    "jspdf-autotable": "3.8.2"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "6.1.2"
+  }
+}

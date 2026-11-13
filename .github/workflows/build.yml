@@ -17,16 +17,23 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: actions/setup-node@v4
         with:
-          gradle-version: '8.7'
+          node-version: '20'
+      - name: Abhängigkeiten
+        run: npm ci
+      - name: Web-Teil in die Android-App kopieren
+        run: npx cap sync android
       - name: APK bauen
-        run: gradle :app:assembleDebug --no-daemon
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
       - name: APK umbenennen
-        run: cp app/build/outputs/apk/debug/app-debug.apk MailTest.apk
-      - name: Als Download bereitstellen (Release "test")
+        run: cp android/app/build/outputs/apk/debug/app-debug.apk Baustellen-Doku.apk
+      - name: Als Download bereitstellen (Release "app")
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release delete test --yes --cleanup-tag || true
-          gh release create test MailTest.apk --title "Mail-Test (neueste Version)" --notes "Auf dem Handy herunterladen und installieren." --target ${{ github.sha }}
+          gh release delete app --yes --cleanup-tag || true
+          gh release create app Baustellen-Doku.apk --title "Baustellen-Doku (neueste Version, Build ${{ github.run_number }})" --notes "Auf dem Handy herunterladen und installieren. Updates lassen sich einfach drüber installieren." --target ${{ github.sha }}

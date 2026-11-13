@@ -1,0 +1,7 @@
+{
+  "appId": "it.baustelle.doku",
+  "appName": "Baustellen-Doku",
+  "webDir": "www",
+  "android": { "allowMixedContent": false },
+  "plugins": { "CapacitorHttp": { "enabled": false } }
+}
