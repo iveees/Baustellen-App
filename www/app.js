@@ -312,7 +312,7 @@ function sheetBaustelle(id) {
   const b = id ? { ...baustelle(id) } : { id: newId("b"), beteiligte: [], erstellt: Date.now(), status: "aktiv" };
   const draw = () => {
     $panel.innerHTML = `<div class="bar"><h2>${id ? "Baustelle bearbeiten" : "Neue Baustelle"}</h2><button class="iconbtn" data-act="close-sheet">×</button></div>
-    <div class="box"><h3>Dropbox-Ordner</h3><div class="hint">Wähle den Ordner <b>„Baustelle“</b> im Projektordner. Dort landen Fotos und Berichte.</div>
+    <div class="box"><h3>Dropbox-Ordner</h3><div class="hint">Wähle im Projektordner den Baustellen-Ordner (z. B. <b>05-BAUSTELLE</b>). Dort landen Fotos und Berichte.</div>
       <div>${b.ordner ? "📁 " + esc(b.ordner.anzeige) : "<i>noch keiner gewählt</i>"}</div>${b.ordner?.privat ? `<div class="banner">Dieser Ordner ist nicht geteilt – dein Partner sieht ihn nicht.</div>` : ""}
       <button class="btn" data-x="ordner">Ordner wählen</button></div>
     <label for="b-name">Name<input type="text" id="b-name" value="${esc(b.name || "")}" placeholder="z. B. Wohnhaus Pichler"></label>
@@ -330,7 +330,7 @@ function sheetBaustelle(id) {
     read();
     if (t.dataset.x === "ordner") {
       const start = b.ordner?.anzeige || "";
-      folderPicker("Ordner „Baustelle“ wählen", start, (ref) => {
+      folderPicker("Baustellen-Ordner wählen", start, (ref) => {
         b.ordner = ref;
         if (!b.name) { const parts = ref.anzeige.split("/").filter(Boolean); b.name = parts.length > 1 && /baustelle/i.test(parts.at(-1)) ? parts.at(-2) : parts.at(-1); }
         sheetBaustelleReopen();
