@@ -291,7 +291,7 @@ function viewAdressbuch() {
   const w = einst().wordName; const wd = V.wordDatei;
   const wordKarte = wd || w ? `<div class="card"><div>${w ? `Quelle: Word-Liste <b>${esc(w)}</b>` : `Word-Liste gefunden: <b>${esc(wd.name)}</b>`}</div>
       <div class="hint">${w ? `Eingelesen: Stand ${einst().wordStand ? fmtDT(einst().wordStand) : "?"}. ` : ""}${wd?.neu ? `<b style="color:var(--open)">In Dropbox liegt eine neuere Version (${fmtDT(wd.stand)}).</b> ` : w ? "Aktuell. " : ""}Einlesen kostet ein paar Cent (Claude).</div>
-      <div class="row"><button class="btn ${wd?.neu ? "primary" : ""}" data-act="word-neu">Word-Liste einlesen</button></div><div class="hint">Kontakte bitte in der Word-Datei ändern, nicht hier.</div></div>`
+      <div class="row"><button class="btn ${wd?.neu ? "primary" : ""}" data-act="word-neu">Word-Liste einlesen</button>${w ? `<button class="btn" data-act="kontakt-abgleich">Mit Handykontakten abgleichen</button>` : ""}</div><div class="hint">Kontakte bitte in der Word-Datei ändern, nicht hier.</div></div>`
     : `<div class="hint">Tipp: Lege eure Word-Liste der Firmen in den gemeinsamen App-Ordner. Dann kannst du sie hier mit einem Knopf einlesen.</div>`;
   return `<div class="top"><div class="grow"><h1>Adressbuch</h1><div class="sub">${live(S.kontakte).length} Kontakte</div></div>${w ? "" : `<button class="btn primary" data-act="kontakt-neu">+ Neu</button>`}</div>
     ${wordKarte}
@@ -1095,6 +1095,166 @@ ${text}`;
   } finally { V.wordStatus = ""; }
 }
 
+// ---------- Handykontakte abgleichen und in die Word-Liste schreiben ----------
+const Contacts = registerPlugin("Contacts");
+const GEWERK_WORTE = /maler|gips|baumeister|bauunternehm|baufirma|maurer|fliese|plattenleg|elektr|hydraul|installat|sanit[äa]r|heizung|l[üu]ftung|klima|tischler|schreiner|zimmer|holzbau|dachdeck|spengler|schlosser|metallbau|schmied|fenster|t[üu]ren|glaser|boden|parkett|estrich|putz|isolier|d[äa]mm|gerüst|kran|bagger|erdbau|erdarbeit|tiefbau|transport|abbruch|pflaster|gärtner|garten|stein|marmor|naturstein|statik|statiker|geometer|geologe|vermess|architekt|ingenieur|\bing\.|\bgeom\.|\barch\.|planer|photovolt|\bpv\b|solar|w[äa]rmepumpe|alarm|markise|rollo|jalousie|verschatt|aufzug|lift|küche|möbel|schwimmbad|pool|imbianc|pittor|piastrell|idraul|elettric|falegnam|carpent|fabbro|lattoniere|impresa|edil|muratore|geometra|ingegnere|serrament|cantiere/i;
+async function handyKontakteLesen() {
+  const p = await Contacts.requestPermissions();
+  if (p.contacts !== "granted") throw new Error("Zugriff auf die Kontakte wurde nicht erlaubt");
+  const r = await Contacts.getContacts({ projection: { name: true, organization: true, phones: true, emails: true, note: true } });
+  return (r.contacts || []).map((c) => ({
+    name: c.name?.display || [c.name?.given, c.name?.family].filter(Boolean).join(" "),
+    firma: c.organization?.company || "", titel: c.organization?.jobTitle || "", notiz: (c.note || "").slice(0, 80),
+    tel: (c.phones || []).map((x) => x.number).filter(Boolean), email: (c.emails || []).map((x) => x.address).filter(Boolean),
+  })).filter((c) => (c.name || c.firma) && (c.tel.length || c.email.length));
+}
+// Auf dem Handy vorsortieren: nur Kontakte, die zu einer Firma der Liste passen oder ein Gewerk im Namen tragen
+function kandidaten(handy, liste) {
+  const woerter = new Set();
+  for (const k of liste) for (const w of [k.firma, k.person].join(" ").toLowerCase().normalize("NFKD").replace(/[̀-ͯ]/g, "").split(/[^a-z0-9]+/))
+    if (w.length >= 4 && !/^(gmbh|des|und|elektro|bauunternehmen|tischlerei|zimmerei|ohg|snc|sas|srl|bau)$/.test(w)) woerter.add(w);
+  const mails = new Set(liste.flatMap((k) => [...(k.email || []), ...(k.pec || [])]).map((m) => m.toLowerCase()));
+  const domains = new Set([...mails].map((m) => m.split("@")[1]).filter((d) => d && !/gmail|yahoo|hotmail|libero|alice|virgilio|outlook|gmx|rolmail|pec|legalmail|tin\.it|icloud/.test(d)));
+  return handy.filter((c) => {
+    const txt = [c.name, c.firma, c.titel, c.notiz].join(" ");
+    const norm = txt.toLowerCase().normalize("NFKD").replace(/[̀-ͯ]/g, "");
+    if (GEWERK_WORTE.test(txt)) return true;
+    if (c.email.some((m) => mails.has(m.toLowerCase()) || domains.has(m.toLowerCase().split("@")[1]))) return true;
+    return norm.split(/[^a-z0-9]+/).some((w) => w.length >= 4 && woerter.has(w));
+  }).slice(0, 400);
+}
+async function kontakteAbgleichen() {
+  const liste = live(S.kontakte);
+  V.kaStatus = "Lese Handykontakte …"; sheetKontaktAbgleich();
+  const handy = await handyKontakteLesen();
+  const kand = kandidaten(handy, liste);
+  if (!kand.length) throw new Error("Keine passenden Handykontakte gefunden");
+  V.kaStatus = `Claude vergleicht ${kand.length} von ${handy.length} Handykontakten mit eurer Liste … (ca. 1 Minute)`; sheetKontaktAbgleich();
+  const prompt = `Abgleich zwischen der Firmenliste eines Architekturbüros in Südtirol und den Handykontakten des Architekten.
+
+FIRMENLISTE (id | Gewerk | Firma | Ansprechpartner | Telefon | E-Mail/PEC):
+${liste.map((k) => `${k.id} | ${k.gewerk} | ${k.firma} | ${k.person || "-"} | ${(k.tel || []).map((t) => t.nr).join(", ") || "-"} | ${[...(k.email || []), ...(k.pec || [])].join(", ") || "-"}`).join("\n")}
+
+HANDYKONTAKTE (Nr | Name | Firma | Telefon | E-Mail):
+${kand.map((c, i) => `${i} | ${c.name} | ${c.firma || "-"} | ${c.tel.join(", ") || "-"} | ${c.email.join(", ") || "-"}`).join("\n")}
+
+Aufgaben:
+1. ergaenzungen: Für Firmen der Liste, zu denen ein Handykontakt eindeutig passt (gleiche Firma, gleicher Ansprechpartner oder gleiche E-Mail), schlage Telefonnummern und E-Mail-Adressen vor, die in der Liste noch FEHLEN. Nichts vorschlagen, was schon drinsteht (auch nicht in anderer Schreibweise).
+2. neu: Handykontakte, die erkennbar Handwerker, Baufirmen, Techniker oder Planer sind (z. B. "Maler Tobias", "Baumeister Gius", "Fliesen Huber", Firmennamen mit Gewerk), aber in der Liste fehlen. Leite das Gewerk ab und verwende möglichst die Gewerk-Bezeichnungen der Liste. Private Kontakte ohne Bezug zum Bau weglassen.
+Bei unsicheren Zuordnungen "sicher": false.
+
+Antworte nur mit JSON:
+{"ergaenzungen":[{"id":"…","tel":["…"],"email":["…"],"handy":"Name des Handykontakts","sicher":true}],
+ "neu":[{"gewerk":"…","gruppe":"Firma|Techniker","firma":"…","person":"…","tel":["…"],"email":["…"],"handy":"Name des Handykontakts","sicher":true}]}`;
+  const r = jsonAus(await claude(prompt, 12000));
+  const ids = new Set(liste.map((k) => k.id));
+  V.kaVorschlaege = {
+    ergaenzungen: (r.ergaenzungen || []).filter((e) => ids.has(e.id) && ((e.tel || []).length || (e.email || []).length)).map((e, i) => ({ ...e, key: "e" + i, an: e.sicher !== false })),
+    neu: (r.neu || []).filter((n) => n.firma).map((n, i) => ({ ...n, key: "n" + i, an: n.sicher !== false })),
+  };
+  V.kaStatus = ""; sheetKontaktAbgleich();
+}
+function sheetKontaktAbgleich() {
+  const v = V.kaVorschlaege;
+  let body;
+  if (V.kaStatus) body = `<div class="empty">${esc(V.kaStatus)}</div>`;
+  else if (!v) body = `<div class="card stack"><div>Die App sucht in deinen Handykontakten nach</div><ul style="margin:0;padding-left:20px"><li>fehlenden <b>Telefonnummern und E-Mails</b> von Firmen eurer Liste</li><li><b>neuen Firmen</b> wie „Maler Tobias“ oder „Fliesen Huber“</li></ul>
+      <div class="hint">Nur Kontakte, die zu einer Firma passen oder ein Gewerk im Namen haben, gehen an Claude – private Kontakte nicht. Kosten: ein paar Cent.</div>
+      <button class="btn primary big" data-ka="start">Handykontakte durchsuchen</button></div>`;
+  else {
+    const ers = v.ergaenzungen, neu = v.neu;
+    const kn = (id) => kontakt(id);
+    body = `${ers.length ? `<h3>Ergänzungen (${ers.length})</h3>${ers.map((e) => `<label class="pick"><input type="checkbox" data-kak="${e.key}" ${e.an ? "checked" : ""}><span><b>${esc(kn(e.id)?.firma || "?")}</b><br>${[...(e.tel || []).map((t) => "☎ " + esc(t)), ...(e.email || []).map((m) => "@ " + esc(m))].join("<br>")}<br><span class="hint">aus „${esc(e.handy || "")}“${e.sicher === false ? " · unsicher" : ""}</span></span></label>`).join("")}` : ""}
+      ${neu.length ? `<h3 style="margin-top:12px">Neue Firmen (${neu.length})</h3>${neu.map((n) => `<label class="pick"><input type="checkbox" data-kak="${n.key}" ${n.an ? "checked" : ""}><span><b>${esc(n.gewerk)}: ${esc(n.firma)}</b>${n.person ? " · " + esc(n.person) : ""}<br>${[...(n.tel || []).map((t) => "☎ " + esc(t)), ...(n.email || []).map((m) => "@ " + esc(m))].join("<br>")}<br><span class="hint">aus „${esc(n.handy || "")}“${n.sicher === false ? " · unsicher" : ""}</span></span></label>`).join("")}` : ""}
+      ${!ers.length && !neu.length ? `<div class="empty">Nichts gefunden – die Liste ist schon vollständig.</div>` : `<button class="btn primary big" data-ka="schreiben">Angehakte in die Word-Liste schreiben</button><div class="hint">Vorher wird automatisch eine Sicherungskopie der Word-Datei angelegt (Ordner „Sicherungen“).</div>`}`;
+  }
+  openSheet(`<div class="bar"><h2>Mit Handykontakten abgleichen</h2><button class="iconbtn" data-ka="zu">×</button></div>${body}`);
+  $panel.onchange = (ev) => { const k = ev.target.dataset?.kak; if (!k) return; const x = [...(v?.ergaenzungen || []), ...(v?.neu || [])].find((y) => y.key === k); if (x) x.an = ev.target.checked; };
+  $panel.onclick = async (ev) => {
+    const t = ev.target.closest("[data-ka]"); if (!t) return;
+    if (t.dataset.ka === "zu") { if (!V.kaStatus) { V.kaVorschlaege = null; closeSheet(); } return; }
+    if (t.dataset.ka === "start") { try { await kontakteAbgleichen(); } catch (e) { V.kaStatus = ""; sheetKontaktAbgleich(); toast(e.message || String(e)); } }
+    if (t.dataset.ka === "schreiben") { try { await inWordSchreiben(); } catch (e) { console.error(e); V.kaStatus = ""; sheetKontaktAbgleich(); toast("Schreiben: " + (e.message || e)); } }
+  };
+}
+// Word-Datei bearbeiten: Absätze einfügen, Format der Nachbarzeile übernehmen
+async function inWordSchreiben() {
+  const v = V.kaVorschlaege;
+  const ers = v.ergaenzungen.filter((e) => e.an), neu = v.neu.filter((n) => n.an);
+  if (!ers.length && !neu.length) { toast("Nichts angehakt"); return; }
+  V.kaStatus = "Word-Datei wird vorbereitet …"; sheetKontaktAbgleich();
+  const eintr = (await Dropbox.rpc("files/list_folder", { path: appPath("") })).entries;
+  const datei = eintr.filter((e) => e[".tag"] === "file" && /\.docx$/i.test(e.name) && !e.name.startsWith("~$")).sort((a, b) => (b.server_modified > a.server_modified ? 1 : -1))[0];
+  if (!datei) throw new Error("Keine Word-Datei im gemeinsamen Ordner");
+  const blob = await Dropbox.download(datei.path_lower);
+  const zip = await JSZip.loadAsync(blob);
+  const xml = await zip.file("word/document.xml").async("string");
+  const doc = new DOMParser().parseFromString(xml, "application/xml");
+  const WNS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+  const body = doc.getElementsByTagNameNS(WNS, "body")[0];
+  const absaetze = [...doc.getElementsByTagNameNS(WNS, "p")];
+  const textVon = (p) => [...p.getElementsByTagNameNS(WNS, "t")].map((n) => n.textContent).join("").trim();
+  const nummeriert = absaetze.map((p, i) => [i, textVon(p)]).filter(([, t]) => t);
+  // Claude bestimmt, wo eingefügt wird und welche Zeile als Formatvorlage dient
+  const auftraege = [
+    ...ers.map((e) => ({ art: "ergaenzung", firma: kontakt(e.id)?.firma, gewerk: kontakt(e.id)?.gewerk, tel: e.tel || [], email: e.email || [] })),
+    ...neu.map((n) => ({ art: "neu", firma: n.firma, person: n.person || "", gewerk: n.gewerk, tel: n.tel || [], email: n.email || [] })),
+  ];
+  V.kaStatus = "Claude sucht die richtigen Stellen in der Word-Datei …"; sheetKontaktAbgleich();
+  const prompt = `Hier sind die nummerierten Absätze einer Word-Firmenliste (Nr: Text). Zwischenüberschriften geben das Gewerk an, darunter folgen die Firmen mit Adresse, E-Mail, Tel usw.
+
+${nummeriert.map(([i, t]) => `${i}: ${t}`).join("\n")}
+
+Folgende Änderungen sollen eingefügt werden:
+${auftraege.map((a, i) => `[${i}] ${a.art === "neu" ? `NEUE FIRMA unter Gewerk "${a.gewerk}": ${a.firma}${a.person ? " (Ansprechpartner " + a.person + ")" : ""}` : `ERGÄNZUNG bei "${a.firma}" (${a.gewerk})`} – Telefon: ${a.tel.join(", ") || "-"} – E-Mail: ${a.email.join(", ") || "-"}`).join("\n")}
+
+Gib für jede Änderung an, nach welchem Absatz eingefügt wird und welche neuen Zeilen es sind:
+- ERGÄNZUNG: nach dem letzten Absatz dieses Firmeneintrags; Zeilen im Stil der Liste, z. B. "Tel: 0471 123456" bzw. die E-Mail-Adresse allein (wie bei den anderen Einträgen).
+- NEUE FIRMA: am Ende des passenden Gewerk-Abschnitts; gibt es das Gewerk nicht, am Ende der Liste mit einer neuen Überschrift (Stil wie die anderen Überschriften). Zeilen: ggf. Überschrift, Firmenname, dann E-Mail und "Tel: …" (mit Ansprechpartner in Klammern hinter der Nummer, wie in der Liste üblich).
+- vorlage: Nummer eines bestehenden Absatzes mit gleichem Zweck, dessen Formatierung übernommen werden soll (für jede Zeile einzeln).
+
+Antworte nur mit JSON: [{"i":0,"nach":123,"zeilen":[{"text":"Tel: …","vorlage":120}]}]`;
+  const plan = jsonAus(await claude(prompt, 6000));
+  if (!Array.isArray(plan)) throw new Error("Einfügestellen nicht erkannt");
+  // Sicherung anlegen
+  V.kaStatus = "Sicherungskopie und Speichern …"; sheetKontaktAbgleich();
+  const stempel = new Date().toISOString().slice(0, 16).replace(/[T:]/g, "-");
+  await Dropbox.rpc("files/copy_v2", { from_path: datei.path_lower, to_path: appPath("/Sicherungen/" + datei.name.replace(/\.docx$/i, "") + " Sicherung " + stempel + ".docx"), autorename: true });
+  // Einfügen (von hinten nach vorne, damit Nummern stimmen)
+  const neuerAbsatz = (vorlage, text) => {
+    const p = vorlage.cloneNode(true);
+    const runs = [...p.getElementsByTagNameNS(WNS, "r")];
+    const ersterRun = runs.find((r) => r.getElementsByTagNameNS(WNS, "t").length) || runs[0];
+    for (const c of [...p.childNodes]) if (c.localName !== "pPr") p.removeChild(c);
+    const r = ersterRun ? ersterRun.cloneNode(true) : doc.createElementNS(WNS, "w:r");
+    for (const c of [...r.childNodes]) if (c.localName !== "rPr") r.removeChild(c);
+    const t = doc.createElementNS(WNS, "w:t"); t.setAttribute("xml:space", "preserve"); t.textContent = text;
+    r.appendChild(t); p.appendChild(r);
+    return p;
+  };
+  for (const s of plan.slice().sort((a, b) => b.nach - a.nach)) {
+    const ref = absaetze[s.nach] || absaetze[absaetze.length - 1];
+    let nachKnoten = ref;
+    for (const z of s.zeilen || []) {
+      const vorlage = absaetze[z.vorlage] || ref;
+      const p = neuerAbsatz(vorlage, String(z.text || ""));
+      nachKnoten.parentNode.insertBefore(p, nachKnoten.nextSibling);
+      nachKnoten = p;
+    }
+  }
+  zip.file("word/document.xml", new XMLSerializer().serializeToString(doc));
+  const neuBlob = await zip.generateAsync({ type: "blob", mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" });
+  let res;
+  try { res = await Dropbox.uploadUpdate(datei.path_lower, neuBlob, datei.rev); }
+  catch (e) { if (e.status === 409) throw new Error("Die Word-Datei wurde gerade woanders geändert – bitte nochmal versuchen"); throw e; }
+  // Adressbuch der App direkt mitziehen
+  for (const e of ers) { const k = kontakt(e.id); if (!k) continue; upsert(S.kontakte, { ...k, tel: [...(k.tel || []), ...(e.tel || []).map((nr) => ({ nr, name: "" }))], email: [...(k.email || []), ...(e.email || [])] }); }
+  for (const n of neu) upsert(S.kontakte, { id: newId("k"), quelle: "word", gewerk: n.gewerk, gruppe: n.gruppe === "Techniker" ? "Techniker" : "Firma", firma: n.firma, person: n.person || "", adresse: "", tel: (n.tel || []).map((nr) => ({ nr, name: "" })), email: n.email || [], pec: [], notiz: "" });
+  upsert(S.einst, { ...einst(), id: "allgemein", wordRev: res.rev, wordName: res.name, wordStand: res.server_modified });
+  V.kaVorschlaege = null; V.kaStatus = ""; closeSheet(); changed();
+  toast(`In die Word-Liste geschrieben: ${ers.length} Ergänzungen, ${neu.length} neue Firmen`);
+}
+
 // ---------- PDF Beteiligtenliste ----------
 const pdfSafe = (s) => String(s ?? "").replace(/[‘’‚]/g, "'").replace(/[“”„]/g, '"').replace(/[–—]/g, "-").replace(/[^\x09\x0A\x0D\x20-\x7E\xA0-\xFF€]/g, "");
 async function pdfBeteiligte(b) {
@@ -1227,6 +1387,7 @@ document.addEventListener("click", async (ev) => {
     case "logout": if (!t.dataset.confirm) { t.dataset.confirm = "1"; t.textContent = "Wirklich abmelden?"; break; } Dropbox.logout(); S.appOrdner = null; persist(); render(); break;
     case "pick-appordner": folderPicker("Gemeinsamen App-Ordner wählen", S.appOrdner?.anzeige || "", (ref) => { S.appOrdner = ref; if (ref.privat) toast("Achtung: Ordner ist nicht geteilt"); persist(); render(); sync(); }); break;
     case "sync": S.abgleich = {}; sync(); break;
+    case "kontakt-abgleich": if (!(einst().apiKey || "").trim()) { toast("Dafür bitte erst den API-Schlüssel eintragen"); break; } V.kaVorschlaege = null; V.kaStatus = ""; sheetKontaktAbgleich(); break;
     case "word-neu": V.wordErzwingen = true; sync(); toast("Word-Liste wird neu eingelesen …"); break;
     case "baustelle-neu": sheetBaustelle(null); break;
     case "baustelle-edit": sheetBaustelle(id); break;

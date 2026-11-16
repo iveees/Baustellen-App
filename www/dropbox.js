@@ -90,6 +90,11 @@ const Dropbox = (() => {
     const r = await call("https://content.dropboxapi.com/2/files/upload", { method: "POST", headers: { "Content-Type": "application/octet-stream", "Dropbox-API-Arg": headerJson({ path, mode: "overwrite", mute: true }) }, body: data });
     return r.json();
   }
+  // Nur überschreiben, wenn die Datei seit dem Lesen unverändert ist
+  async function uploadUpdate(path, data, rev) {
+    const r = await call("https://content.dropboxapi.com/2/files/upload", { method: "POST", headers: { "Content-Type": "application/octet-stream", "Dropbox-API-Arg": headerJson({ path, mode: { ".tag": "update", update: rev }, autorename: false, mute: true }) }, body: data });
+    return r.json();
+  }
   async function listFolders(path) {
     let res = await rpc("files/list_folder", { path, include_mounted_folders: true, limit: 2000 });
     const out = [...res.entries];
@@ -118,7 +123,7 @@ const Dropbox = (() => {
   return {
     get auth() { return auth; }, set auth(a) { auth = a; },
     onAuth(fn) { onAuthChange = fn; },
-    startLogin, finishLogin, rpc, download, thumbnail, upload, listFolders, createFolder, folderRef, refPath,
+    startLogin, finishLogin, rpc, download, thumbnail, upload, uploadUpdate, listFolders, createFolder, folderRef, refPath,
     logout() { auth = null; onAuthChange(null); },
   };
 })();
