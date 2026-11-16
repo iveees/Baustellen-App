@@ -107,8 +107,9 @@ async function sync() {
       await syncDoc(bPath(b, "/Baustellen-Doku.json"), () => S.eintraege[b.id] || [], (v) => (S.eintraege[b.id] = v));
       await syncDoc(bPath(b, "/Baustellen-Protokolle.json"), () => S.protokolle[b.id] || [], (v) => (S.protokolle[b.id] = v));
     }
+    for (const b of live(S.baustellen)) if (b.ordner) { try { await dateienAbgleichen(b); } catch (e) { console.warn("Abgleich", e); } }
     await uploadQueue();
-    S.letzterSync = Date.now(); S.syncFehler = "";
+    S.letzterSync = Date.now(); S.syncFehler = S.queue.length ? S.queue.length + " Datei(en) noch nicht hochgeladen – wird erneut versucht" + (V.uploadFehler ? " (" + V.uploadFehler + ")" : "") : "";
   } catch (e) {
     console.error(e);
     S.syncFehler = e.status === 401 ? "Dropbox-Anmeldung abgelaufen – bitte neu anmelden" : e.notFound ? "Ordner in Dropbox nicht gefunden: " + (e.summary || "") : "Synchronisieren fehlgeschlagen (" + (e.message || e) + ")";
@@ -117,18 +118,34 @@ async function sync() {
     if (syncAgain) { syncAgain = false; scheduleSync(500); }
   }
 }
+const UNTERORDNER = { foto: "/Fotos/", pdf: "/Berichte/", protokoll: "/Protokolle/" };
+async function lokaleDatei(rel) {
+  try { const r = await fetch(fileSrc(rel)); if (!r.ok) return null; const bl = await r.blob(); return bl.size ? bl : null; } catch { return null; }
+}
 async function uploadQueue() {
   const rest = [];
   for (const q of S.queue) {
     const b = baustelle(q.bid);
     if (!b?.ordner) { rest.push(q); continue; }
-    try {
-      const blob = await (await fetch(fileSrc(q.lokal))).blob();
-      const sub = q.art === "pdf" ? "/Berichte/" : q.art === "protokoll" ? "/Protokolle/" : "/Fotos/";
-      await Dropbox.upload(bPath(b, sub + q.name), blob);
-    } catch (e) { if (e.status) rest.push(q); else console.warn("Datei fehlt", q); }
+    const blob = await lokaleDatei(q.lokal);
+    if (!blob) { console.warn("Datei fehlt auf dem Handy", q); continue; }   // nur dann verwerfen
+    try { await Dropbox.upload(bPath(b, UNTERORDNER[q.art] + q.name), blob); }
+    catch (e) { console.warn("Upload später erneut", q, e); V.uploadFehler = (e.summary || e.message || String(e)).slice(0, 80); rest.push(q); }  // Netz/Server: behalten
   }
   S.queue = rest;
+}
+// Fehlt etwas in Dropbox, das auf diesem Handy liegt? Dann nachladen.
+async function dateienAbgleichen(b) {
+  S.abgleich = S.abgleich || {};
+  if (Date.now() - (S.abgleich[b.id] || 0) < 10 * 60 * 1000) return;
+  const liste = async (sub) => { try { return new Set((await Dropbox.rpc("files/list_folder", { path: bPath(b, sub) })).entries.map((e) => e.name.toLowerCase())); } catch (e) { if (e.notFound) return new Set(); throw e; } };
+  const [fotos, prots] = [await liste("/Fotos"), await liste("/Protokolle")];
+  const inQueue = new Set(S.queue.map((q) => q.name));
+  for (const e of live(S.eintraege[b.id] || [])) for (const f of e.fotos || [])
+    if (S.lokal[f] && !fotos.has(f.toLowerCase()) && !inQueue.has(f)) S.queue.push({ art: "foto", bid: b.id, name: f, lokal: S.lokal[f] });
+  for (const p of live(S.protokolle[b.id] || []))
+    if (p.datei && S.lokal[p.datei] && !prots.has(p.datei.toLowerCase()) && !inQueue.has(p.datei)) S.queue.push({ art: "protokoll", bid: b.id, name: p.datei, lokal: S.lokal[p.datei] });
+  S.abgleich[b.id] = Date.now();
 }
 
 // Fotos des Partners: Vorschau aus Dropbox laden
@@ -1062,7 +1079,7 @@ document.addEventListener("click", async (ev) => {
       break;
     case "logout": if (!t.dataset.confirm) { t.dataset.confirm = "1"; t.textContent = "Wirklich abmelden?"; break; } Dropbox.logout(); S.appOrdner = null; persist(); render(); break;
     case "pick-appordner": folderPicker("Gemeinsamen App-Ordner wählen", S.appOrdner?.anzeige || "", (ref) => { S.appOrdner = ref; if (ref.privat) toast("Achtung: Ordner ist nicht geteilt"); persist(); render(); sync(); }); break;
-    case "sync": sync(); break;
+    case "sync": S.abgleich = {}; sync(); break;
     case "baustelle-neu": sheetBaustelle(null); break;
     case "baustelle-edit": sheetBaustelle(id); break;
     case "tab": V.tab = t.dataset.v; render(); break;
