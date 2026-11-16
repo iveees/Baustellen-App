@@ -648,11 +648,12 @@ function satzAnhaengen(alt, neu) {
 
 // ---------- Claude: Punkte zusammenfassen ----------
 const MODELLE = ["claude-sonnet-5-5", "claude-haiku-5-5"];
-async function claude(prompt, maxTokens = 4000, onFortschritt) {
+async function claude(prompt, maxTokens = 4000, onFortschritt, { modelle = MODELLE, onWarten } = {}) {
   const key = (einst().apiKey || "").trim();
   if (!key) throw new Error("Kein API-Schlüssel eingetragen");
-  let letzter;
-  for (const model of MODELLE) {
+  let letzter, wartungen = 0;
+  for (let mi = 0; mi < modelle.length; mi++) {
+    const model = modelle[mi];
     let r;
     try {
       r = await fetch("https://api.anthropic.com/v1/messages", {
@@ -682,6 +683,13 @@ async function claude(prompt, maxTokens = 4000, onFortschritt) {
       return text;
     }
     let msg = ""; try { msg = (await r.json()).error?.message || ""; } catch {}
+    // Limit pro Minute erreicht oder Claude ausgelastet: abwarten und dasselbe Modell nochmal
+    if ((r.status === 429 || r.status === 529) && wartungen < 6) {
+      wartungen++;
+      let sek = parseInt(r.headers.get("retry-after") || "", 10); if (!(sek > 0)) sek = 20 * wartungen; sek = Math.min(sek + 2, 90);
+      for (let rest = sek; rest > 0; rest--) { onWarten?.(rest, r.status); await new Promise((ok) => setTimeout(ok, 1000)); }
+      mi--; continue;
+    }
     letzter = new Error(r.status === 401 ? "API-Schlüssel ungültig" : r.status === 400 && /credit/i.test(msg) ? "Guthaben bei Anthropic aufgebraucht" : r.status === 529 || r.status === 429 ? "Claude ist gerade ausgelastet – bitte gleich nochmal" : `Fehler ${r.status} ${msg}`);
     if (r.status !== 404 && !/model/i.test(msg)) break;
   }
@@ -1175,8 +1183,16 @@ async function kontakteAbgleichen() {
    "neu":[{"gewerk":"…","gruppe":"Firma|Techniker","firma":"…","person":"…","tel":["…"],"email":["…"],"handy":"Name des Handykontakts","sicher":true}]}`;
     let antwort, versuch = 0;
     for (;;) {
-      try { antwort = jsonAus(await claude(prompt, 6000)); break; }
-      catch (e) { if (++versuch >= 2) throw e; V.kaStatus = "Verbindung unterbrochen – neuer Versuch …"; sheetKontaktAbgleich(); await new Promise((ok) => setTimeout(ok, 2000)); }
+      try {
+        antwort = jsonAus(await claude(prompt, 3000, null, {
+          modelle: ["claude-haiku-5-5", ...MODELLE],
+          onWarten: (rest, st) => { V.kaStatus = `Teil ${t + 1} von ${teile}: ${st === 429 ? "Claude-Limit pro Minute erreicht" : "Claude ist ausgelastet"} – warte ${rest} s …`; sheetKontaktAbgleich(); },
+        }));
+        break;
+      } catch (e) {
+        if (++versuch >= 3) throw new Error(`Teil ${t + 1} von ${teile}: ${e.message || e}`);
+        V.kaStatus = `Teil ${t + 1} von ${teile}: ${e.message || "Fehler"} – neuer Versuch in 10 s …`; sheetKontaktAbgleich(); await new Promise((ok) => setTimeout(ok, 10000));
+      }
     }
     r.ergaenzungen.push(...(antwort.ergaenzungen || []));
     for (const n of antwort.neu || []) if (!r.neu.some((x) => normFirma(x.firma) === normFirma(n.firma))) r.neu.push(n);
@@ -1206,12 +1222,12 @@ function sheetKontaktAbgleich() {
       ${neu.length ? `<h3 style="margin-top:12px">Neue Firmen (${neu.length})</h3>${neu.map((n) => `<label class="pick"><input type="checkbox" data-kak="${n.key}" ${n.an ? "checked" : ""}><span><b>${esc(n.gewerk)}: ${esc(n.firma)}</b>${n.person ? " · " + esc(n.person) : ""}<br>${[...(n.tel || []).map((t) => "☎ " + esc(t)), ...(n.email || []).map((m) => "@ " + esc(m))].join("<br>")}<br><span class="hint">aus „${esc(n.handy || "")}“${n.sicher === false ? " · unsicher" : ""}</span></span></label>`).join("")}` : ""}
       ${!ers.length && !neu.length ? `<div class="empty">Nichts gefunden – die Liste ist schon vollständig.</div>` : `<button class="btn primary big" data-ka="schreiben">Angehakte in die Word-Liste schreiben</button><div class="hint">Vorher wird automatisch eine Sicherungskopie der Word-Datei angelegt (Ordner „Sicherungen“).</div>`}`;
   }
-  openSheet(`<div class="bar"><h2>Mit Handykontakten abgleichen</h2><button class="iconbtn" data-ka="zu">×</button></div>${body}`);
+  openSheet(`<div class="bar"><h2>Mit Handykontakten abgleichen</h2><button class="iconbtn" data-ka="zu">×</button></div>${V.kaFehler ? `<div class="banner">Abgebrochen: ${esc(V.kaFehler)}</div>` : ""}${body}`);
   $panel.onchange = (ev) => { const k = ev.target.dataset?.kak; if (!k) return; const x = [...(v?.ergaenzungen || []), ...(v?.neu || [])].find((y) => y.key === k); if (x) x.an = ev.target.checked; };
   $panel.onclick = async (ev) => {
     const t = ev.target.closest("[data-ka]"); if (!t) return;
     if (t.dataset.ka === "zu") { if (!V.kaStatus) { V.kaVorschlaege = null; closeSheet(); } return; }
-    if (t.dataset.ka === "start") { try { await kontakteAbgleichen(); } catch (e) { V.kaStatus = ""; sheetKontaktAbgleich(); toast(e.message || String(e)); } }
+    if (t.dataset.ka === "start") { try { await kontakteAbgleichen(); } catch (e) { V.kaStatus = ""; V.kaFehler = e.message || String(e); sheetKontaktAbgleich(); V.kaFehler = ""; } }
     if (t.dataset.ka === "schreiben") { try { await inWordSchreiben(); } catch (e) { console.error(e); V.kaStatus = ""; sheetKontaktAbgleich(); toast("Schreiben: " + (e.message || e)); } }
   };
 }
