@@ -1247,7 +1247,7 @@ function sheetKontaktAbgleich() {
     const t = ev.target.closest("[data-ka]"); if (!t) return;
     if (t.dataset.ka === "zu") { if (!V.kaStatus) { V.kaVorschlaege = null; closeSheet(); } return; }
     if (t.dataset.ka === "start") { try { await kontakteAbgleichen(); } catch (e) { V.kaStatus = ""; V.kaFehler = e.message || String(e); sheetKontaktAbgleich(); V.kaFehler = ""; } }
-    if (t.dataset.ka === "schreiben") { try { await inWordSchreiben(); } catch (e) { console.error(e); V.kaStatus = ""; sheetKontaktAbgleich(); toast("Schreiben: " + (e.message || e)); } }
+    if (t.dataset.ka === "schreiben") { try { await inWordSchreiben(); } catch (e) { console.error(e); V.kaStatus = ""; V.kaFehler = "Schreiben: " + (e.message || e); sheetKontaktAbgleich(); V.kaFehler = ""; } }
   };
 }
 // Word-Datei bearbeiten: Absätze einfügen, Format der Nachbarzeile übernehmen
@@ -1273,22 +1273,43 @@ async function inWordSchreiben(ersIn, neuIn, { mitziehen = true } = {}) {
     ...ers.map((e) => ({ art: "ergaenzung", firma: kontakt(e.id)?.firma, gewerk: kontakt(e.id)?.gewerk, tel: e.tel || [], email: e.email || [] })),
     ...neu.map((n) => ({ art: "neu", firma: n.firma, person: n.person || "", gewerk: n.gewerk, tel: n.tel || [], email: n.email || [] })),
   ];
-  V.kaStatus = "Claude sucht die richtigen Stellen in der Word-Datei …"; sheetKontaktAbgleich();
-  const prompt = `Hier sind die nummerierten Absätze einer Word-Firmenliste (Nr: Text). Zwischenüberschriften geben das Gewerk an, darunter folgen die Firmen mit Adresse, E-Mail, Tel usw.
+  // In Portionen planen lassen (gleiche Gewerke zusammen, damit eine neue Überschrift nur einmal entsteht)
+  auftraege.sort((a, b) => String(a.gewerk).localeCompare(String(b.gewerk), "de"));
+  const absatzListe = nummeriert.map(([i, t]) => `${i}: ${t}`).join("\n");
+  const PORTION = 15, teile = Math.ceil(auftraege.length / PORTION);
+  const plan = [];
+  for (let t = 0; t < teile; t++) {
+    const teil = auftraege.slice(t * PORTION, (t + 1) * PORTION);
+    V.kaStatus = `Claude sucht die richtigen Stellen in der Word-Datei … Teil ${t + 1} von ${teile}`; sheetKontaktAbgleich();
+    const prompt = `Hier sind die nummerierten Absätze einer Word-Firmenliste (Nr: Text). Zwischenüberschriften geben das Gewerk an, darunter folgen die Firmen mit Adresse, E-Mail, Tel usw.
 
-${nummeriert.map(([i, t]) => `${i}: ${t}`).join("\n")}
+${absatzListe}
 
 Folgende Änderungen sollen eingefügt werden:
-${auftraege.map((a, i) => `[${i}] ${a.art === "neu" ? `NEUE FIRMA unter Gewerk "${a.gewerk}": ${a.firma}${a.person ? " (Ansprechpartner " + a.person + ")" : ""}` : `ERGÄNZUNG bei "${a.firma}" (${a.gewerk})`} – Telefon: ${a.tel.join(", ") || "-"} – E-Mail: ${a.email.join(", ") || "-"}`).join("\n")}
+${teil.map((a, i) => `[${i}] ${a.art === "neu" ? `NEUE FIRMA unter Gewerk "${a.gewerk}": ${a.firma}${a.person ? " (Ansprechpartner " + a.person + ")" : ""}` : `ERGÄNZUNG bei "${a.firma}" (${a.gewerk})`} – Telefon: ${a.tel.join(", ") || "-"} – E-Mail: ${a.email.join(", ") || "-"}`).join("\n")}
 
 Gib für jede Änderung an, nach welchem Absatz eingefügt wird und welche neuen Zeilen es sind:
 - ERGÄNZUNG: nach dem letzten Absatz dieses Firmeneintrags; Zeilen im Stil der Liste, z. B. "Tel: 0471 123456" bzw. die E-Mail-Adresse allein (wie bei den anderen Einträgen).
-- NEUE FIRMA: am Ende des passenden Gewerk-Abschnitts; gibt es das Gewerk nicht, am Ende der Liste mit einer neuen Überschrift (Stil wie die anderen Überschriften). Zeilen: ggf. Überschrift, Firmenname, dann E-Mail und "Tel: …" (mit Ansprechpartner in Klammern hinter der Nummer, wie in der Liste üblich).
+- NEUE FIRMA: am Ende des passenden Gewerk-Abschnitts; gibt es das Gewerk nicht, am Ende der Liste mit einer neuen Überschrift (Stil wie die anderen Überschriften; bei mehreren neuen Firmen desselben neuen Gewerks die Überschrift nur einmal). Zeilen: ggf. Überschrift, Firmenname, dann E-Mail und "Tel: …" (mit Ansprechpartner in Klammern hinter der Nummer, wie in der Liste üblich).
 - vorlage: Nummer eines bestehenden Absatzes mit gleichem Zweck, dessen Formatierung übernommen werden soll (für jede Zeile einzeln).
 
-Antworte nur mit JSON: [{"i":0,"nach":123,"zeilen":[{"text":"Tel: …","vorlage":120}]}]`;
-  const plan = jsonAus(await claude(prompt, 6000));
-  if (!Array.isArray(plan)) throw new Error("Einfügestellen nicht erkannt");
+Antworte NUR mit JSON-Zeilen, genau ein Objekt pro Änderung und Zeile, ohne Code-Block und ohne weiteren Text:
+{"i":0,"nach":123,"zeilen":[{"text":"Tel: …","vorlage":120}]}`;
+    let antwort, versuch = 0;
+    for (;;) {
+      try {
+        antwort = jsonZeilen(await claude(prompt, 8000, null, {
+          onWarten: (rest, st) => { V.kaStatus = `Teil ${t + 1} von ${teile}: ${st === 429 ? "Claude-Limit pro Minute erreicht" : "Claude ist ausgelastet"} – warte ${rest} s …`; sheetKontaktAbgleich(); },
+        }));
+        break;
+      } catch (e) {
+        if (++versuch >= 3) throw new Error(`Teil ${t + 1} von ${teile}: ${e.message || e} – die Word-Datei wurde NICHT verändert`);
+        V.kaStatus = `Teil ${t + 1} von ${teile}: ${e.message || "Fehler"} – neuer Versuch in 10 s …`; sheetKontaktAbgleich(); await new Promise((ok) => setTimeout(ok, 10000));
+      }
+    }
+    plan.push(...antwort.filter((x) => Number.isInteger(+x.nach) && Array.isArray(x.zeilen)));
+  }
+  if (!plan.length) throw new Error("Einfügestellen nicht erkannt – die Word-Datei wurde NICHT verändert");
   // Sicherung anlegen
   V.kaStatus = "Sicherungskopie und Speichern …"; sheetKontaktAbgleich();
   const stempel = new Date().toISOString().slice(0, 16).replace(/[T:]/g, "-");
