@@ -648,19 +648,41 @@ function satzAnhaengen(alt, neu) {
 
 // ---------- Claude: Punkte zusammenfassen ----------
 const MODELLE = ["claude-sonnet-5-5", "claude-haiku-5-5"];
-async function claude(prompt, maxTokens = 4000) {
+async function claude(prompt, maxTokens = 4000, onFortschritt) {
   const key = (einst().apiKey || "").trim();
   if (!key) throw new Error("Kein API-Schlüssel eingetragen");
   let letzter;
   for (const model of MODELLE) {
-    const r = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: { "x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json", "anthropic-dangerous-direct-browser-access": "true" },
-      body: JSON.stringify({ model, max_tokens: maxTokens, messages: [{ role: "user", content: prompt }] }),
-    });
-    if (r.ok) { const j = await r.json(); return (j.content || []).map((c) => c.text || "").join(""); }
+    let r;
+    try {
+      r = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json", "anthropic-dangerous-direct-browser-access": "true" },
+        body: JSON.stringify({ model, max_tokens: maxTokens, stream: true, messages: [{ role: "user", content: prompt }] }),
+      });
+    } catch (e) { throw new Error("Keine Verbindung zu Claude – Netz prüfen und nochmal versuchen"); }
+    if (r.ok) {
+      // Antwort Stück für Stück lesen (hält die Verbindung am Leben)
+      const reader = r.body.getReader(); const dec = new TextDecoder();
+      let puffer = "", text = "";
+      try {
+        for (;;) {
+          const { value, done } = await reader.read(); if (done) break;
+          puffer += dec.decode(value, { stream: true });
+          let nl;
+          while ((nl = puffer.indexOf("\n")) >= 0) {
+            const zeile = puffer.slice(0, nl).trim(); puffer = puffer.slice(nl + 1);
+            if (!zeile.startsWith("data:")) continue;
+            let ev; try { ev = JSON.parse(zeile.slice(5)); } catch { continue; }
+            if (ev.type === "content_block_delta" && ev.delta?.text) { text += ev.delta.text; onFortschritt?.(text.length); }
+            if (ev.type === "error") throw new Error("Claude: " + (ev.error?.message || "Fehler"));
+          }
+        }
+      } catch (e) { if (/Claude:/.test(e.message)) throw e; throw new Error("Verbindung zu Claude abgebrochen – bitte nochmal versuchen"); }
+      return text;
+    }
     let msg = ""; try { msg = (await r.json()).error?.message || ""; } catch {}
-    letzter = new Error(r.status === 401 ? "API-Schlüssel ungültig" : r.status === 400 && /credit/i.test(msg) ? "Guthaben bei Anthropic aufgebraucht" : `Fehler ${r.status} ${msg}`);
+    letzter = new Error(r.status === 401 ? "API-Schlüssel ungültig" : r.status === 400 && /credit/i.test(msg) ? "Guthaben bei Anthropic aufgebraucht" : r.status === 529 || r.status === 429 ? "Claude ist gerade ausgelastet – bitte gleich nochmal" : `Fehler ${r.status} ${msg}`);
     if (r.status !== 404 && !/model/i.test(msg)) break;
   }
   throw letzter;
@@ -1111,8 +1133,9 @@ async function handyKontakteLesen() {
 // Auf dem Handy vorsortieren: nur Kontakte, die zu einer Firma der Liste passen oder ein Gewerk im Namen tragen
 function kandidaten(handy, liste) {
   const woerter = new Set();
-  for (const k of liste) for (const w of [k.firma, k.person].join(" ").toLowerCase().normalize("NFKD").replace(/[̀-ͯ]/g, "").split(/[^a-z0-9]+/))
-    if (w.length >= 4 && !/^(gmbh|des|und|elektro|bauunternehmen|tischlerei|zimmerei|ohg|snc|sas|srl|bau)$/.test(w)) woerter.add(w);
+  const ALLGEMEIN = /^(gmbh|des|und|der|die|das|elektro|bauunternehmen|bauunternehmung|tischlerei|zimmerei|holzbau|metallbau|malerarbeiten|fenster|fensterbau|technik|service|italien|italia|ohg|snc|sas|srl|srls|bau|baufirma|hydraulik|thomas|andreas|martin|michael|robert|walter|paul|franz|josef|peter|markus|stefan|christian|manfred|werner|hannes|simon|tobias|alexander|luca|marco|giulio|andrea|alessandro|roman|norbert|diego|enzio|erich|ivan)$/;
+  for (const k of liste) for (const w of String(k.firma || "").toLowerCase().normalize("NFKD").replace(/[̀-ͯ]/g, "").split(/[^a-z0-9]+/))
+    if (w.length >= 5 && !ALLGEMEIN.test(w)) woerter.add(w);
   const mails = new Set(liste.flatMap((k) => [...(k.email || []), ...(k.pec || [])]).map((m) => m.toLowerCase()));
   const domains = new Set([...mails].map((m) => m.split("@")[1]).filter((d) => d && !/gmail|yahoo|hotmail|libero|alice|virgilio|outlook|gmx|rolmail|pec|legalmail|tin\.it|icloud/.test(d)));
   return handy.filter((c) => {
@@ -1120,8 +1143,8 @@ function kandidaten(handy, liste) {
     const norm = txt.toLowerCase().normalize("NFKD").replace(/[̀-ͯ]/g, "");
     if (GEWERK_WORTE.test(txt)) return true;
     if (c.email.some((m) => mails.has(m.toLowerCase()) || domains.has(m.toLowerCase().split("@")[1]))) return true;
-    return norm.split(/[^a-z0-9]+/).some((w) => w.length >= 4 && woerter.has(w));
-  }).slice(0, 400);
+    return norm.split(/[^a-z0-9]+/).some((w) => w.length >= 5 && woerter.has(w));
+  }).slice(0, 300);
 }
 async function kontakteAbgleichen() {
   const liste = live(S.kontakte);
@@ -1129,27 +1152,42 @@ async function kontakteAbgleichen() {
   const handy = await handyKontakteLesen();
   const kand = kandidaten(handy, liste);
   if (!kand.length) throw new Error("Keine passenden Handykontakte gefunden");
-  V.kaStatus = `Claude vergleicht ${kand.length} von ${handy.length} Handykontakten mit eurer Liste … (ca. 1 Minute)`; sheetKontaktAbgleich();
-  const prompt = `Abgleich zwischen der Firmenliste eines Architekturbüros in Südtirol und den Handykontakten des Architekten.
+  const PORTION = 50, teile = Math.ceil(kand.length / PORTION);
+  const r = { ergaenzungen: [], neu: [] };
+  for (let t = 0; t < teile; t++) {
+    const teil = kand.slice(t * PORTION, (t + 1) * PORTION);
+    V.kaStatus = `Claude vergleicht ${kand.length} von ${handy.length} Handykontakten mit eurer Liste … Teil ${t + 1} von ${teile}`; sheetKontaktAbgleich();
+    const prompt = `Abgleich zwischen der Firmenliste eines Architekturbüros in Südtirol und den Handykontakten des Architekten.
 
-FIRMENLISTE (id | Gewerk | Firma | Ansprechpartner | Telefon | E-Mail/PEC):
-${liste.map((k) => `${k.id} | ${k.gewerk} | ${k.firma} | ${k.person || "-"} | ${(k.tel || []).map((t) => t.nr).join(", ") || "-"} | ${[...(k.email || []), ...(k.pec || [])].join(", ") || "-"}`).join("\n")}
+  FIRMENLISTE (id | Gewerk | Firma | Ansprechpartner | Telefon | E-Mail/PEC):
+  ${liste.map((k) => `${k.id} | ${k.gewerk} | ${k.firma} | ${k.person || "-"} | ${(k.tel || []).map((t) => t.nr).join(", ") || "-"} | ${[...(k.email || []), ...(k.pec || [])].join(", ") || "-"}`).join("\n")}
 
-HANDYKONTAKTE (Nr | Name | Firma | Telefon | E-Mail):
-${kand.map((c, i) => `${i} | ${c.name} | ${c.firma || "-"} | ${c.tel.join(", ") || "-"} | ${c.email.join(", ") || "-"}`).join("\n")}
+  HANDYKONTAKTE (Nr | Name | Firma | Telefon | E-Mail):
+  ${teil.map((c, i) => `${i} | ${c.name} | ${c.firma || "-"} | ${c.tel.join(", ") || "-"} | ${c.email.join(", ") || "-"}`).join("\n")}
 
-Aufgaben:
-1. ergaenzungen: Für Firmen der Liste, zu denen ein Handykontakt eindeutig passt (gleiche Firma, gleicher Ansprechpartner oder gleiche E-Mail), schlage Telefonnummern und E-Mail-Adressen vor, die in der Liste noch FEHLEN. Nichts vorschlagen, was schon drinsteht (auch nicht in anderer Schreibweise).
-2. neu: Handykontakte, die erkennbar Handwerker, Baufirmen, Techniker oder Planer sind (z. B. "Maler Tobias", "Baumeister Gius", "Fliesen Huber", Firmennamen mit Gewerk), aber in der Liste fehlen. Leite das Gewerk ab und verwende möglichst die Gewerk-Bezeichnungen der Liste. Private Kontakte ohne Bezug zum Bau weglassen.
-Bei unsicheren Zuordnungen "sicher": false.
+  Aufgaben:
+  1. ergaenzungen: Für Firmen der Liste, zu denen ein Handykontakt eindeutig passt (gleiche Firma, gleicher Ansprechpartner oder gleiche E-Mail), schlage Telefonnummern und E-Mail-Adressen vor, die in der Liste noch FEHLEN. Nichts vorschlagen, was schon drinsteht (auch nicht in anderer Schreibweise).
+  2. neu: Handykontakte, die erkennbar Handwerker, Baufirmen, Techniker oder Planer sind (z. B. "Maler Tobias", "Baumeister Gius", "Fliesen Huber", Firmennamen mit Gewerk), aber in der Liste fehlen. Leite das Gewerk ab und verwende möglichst die Gewerk-Bezeichnungen der Liste. Private Kontakte ohne Bezug zum Bau weglassen.
+  Bei unsicheren Zuordnungen "sicher": false.
 
-Antworte nur mit JSON:
-{"ergaenzungen":[{"id":"…","tel":["…"],"email":["…"],"handy":"Name des Handykontakts","sicher":true}],
- "neu":[{"gewerk":"…","gruppe":"Firma|Techniker","firma":"…","person":"…","tel":["…"],"email":["…"],"handy":"Name des Handykontakts","sicher":true}]}`;
-  const r = jsonAus(await claude(prompt, 12000));
+  Antworte nur mit JSON:
+  {"ergaenzungen":[{"id":"…","tel":["…"],"email":["…"],"handy":"Name des Handykontakts","sicher":true}],
+   "neu":[{"gewerk":"…","gruppe":"Firma|Techniker","firma":"…","person":"…","tel":["…"],"email":["…"],"handy":"Name des Handykontakts","sicher":true}]}`;
+    let antwort, versuch = 0;
+    for (;;) {
+      try { antwort = jsonAus(await claude(prompt, 6000)); break; }
+      catch (e) { if (++versuch >= 2) throw e; V.kaStatus = "Verbindung unterbrochen – neuer Versuch …"; sheetKontaktAbgleich(); await new Promise((ok) => setTimeout(ok, 2000)); }
+    }
+    r.ergaenzungen.push(...(antwort.ergaenzungen || []));
+    for (const n of antwort.neu || []) if (!r.neu.some((x) => normFirma(x.firma) === normFirma(n.firma))) r.neu.push(n);
+  }
   const ids = new Set(liste.map((k) => k.id));
   V.kaVorschlaege = {
-    ergaenzungen: (r.ergaenzungen || []).filter((e) => ids.has(e.id) && ((e.tel || []).length || (e.email || []).length)).map((e, i) => ({ ...e, key: "e" + i, an: e.sicher !== false })),
+    ergaenzungen: Object.values((r.ergaenzungen || []).filter((e) => ids.has(e.id) && ((e.tel || []).length || (e.email || []).length)).reduce((m, e) => {
+      const x = m[e.id] || (m[e.id] = { ...e, tel: [], email: [] });
+      for (const t of e.tel || []) if (!x.tel.includes(t)) x.tel.push(t);
+      for (const a of e.email || []) if (!x.email.includes(a)) x.email.push(a);
+      if (e.sicher === false) x.sicher = false; return m; }, {})).map((e, i) => ({ ...e, key: "e" + i, an: e.sicher !== false })),
     neu: (r.neu || []).filter((n) => n.firma).map((n, i) => ({ ...n, key: "n" + i, an: n.sicher !== false })),
   };
   V.kaStatus = ""; sheetKontaktAbgleich();
