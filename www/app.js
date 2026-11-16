@@ -228,12 +228,14 @@ function viewBaustelle(id) {
   let body;
   if (V.tab === "eintraege") {
     body = `<div class="chips"><button class="chip" aria-pressed="${V.filter === "offen"}" data-act="filter" data-v="offen">Offen (${es.filter((e) => e.status !== "erledigt").length})</button><button class="chip" aria-pressed="${V.filter === "alle"}" data-act="filter" data-v="alle">Alle (${es.length})</button></div>
-    <div class="stack">${shown.map((e) => entryCard(e)).join("") || `<div class="empty">${V.filter === "offen" ? "Keine offenen Punkte." : "Noch keine Einträge."}</div>`}</div>`;
+    <div class="stack">${shown.map((e) => entryCard(e)).join("") || `<div class="empty">${V.filter === "offen" ? "Keine offenen Punkte." : "Noch keine Einträge."}</div>`}</div>
+    ${shown.length ? `<div class="hint">Zum schnellen Löschen lange auf einen Punkt drücken.</div>` : ""}`;
   } else if (V.tab === "protokolle") {
     body = `<button class="btn primary" data-act="protokoll-neu" data-id="${esc(id)}">+ Protokoll erstellen</button>
-    <div class="stack">${prots.map((p) => `<div class="card"><div class="title">Protokoll Nr. ${p.nr} · ${fmtDate(p.datum)}</div>
-      <div class="meta"><span>${p.punkte?.length || 0} Punkte</span><span>${(p.anwesende || []).length} Anwesende</span>${p.verfasser ? `<span>${esc(p.verfasser)}</span>` : ""}</div>
-      <div class="row"><button class="btn primary" data-act="protokoll-ansehen" data-b="${esc(id)}" data-id="${esc(p.id)}">Ansehen</button><button class="btn" data-act="protokoll-senden" data-b="${esc(id)}" data-id="${esc(p.id)}">An alle senden</button>${p.nr === prots[0].nr ? `<button class="btn" data-act="protokoll-neu-erstellen" data-b="${esc(id)}" data-id="${esc(p.id)}">Neu erstellen</button>` : ""}</div></div>`).join("") || `<div class="empty">Noch kein Protokoll.</div>`}</div>`;
+    <div class="hint">Zum Löschen lange auf ein Protokoll drücken.</div>
+    <div class="stack">${prots.map((p) => `<div class="card" data-lp="protokoll" data-b="${esc(id)}" data-id="${esc(p.id)}"><div class="title">Protokoll Nr. ${p.nr} · ${fmtDate(p.datum)}</div>
+      <div class="meta"><span>${p.punkte?.length || 0} ${p.punkte?.length === 1 ? "Punkt" : "Punkte"}</span>${p.verfasser ? `<span>${esc(p.verfasser)}</span>` : ""}<span>${S.queue.some((q) => q.name === p.datei) ? "⏳ wird in Dropbox gespeichert" : "☁ in Dropbox gespeichert"}</span></div>
+      <div class="row"><button class="btn primary" data-act="protokoll-ansehen" data-b="${esc(id)}" data-id="${esc(p.id)}">Ansehen</button><button class="btn" data-act="protokoll-senden" data-b="${esc(id)}" data-id="${esc(p.id)}">Mail vorbereiten</button>${p.nr === prots[0].nr ? `<button class="btn" data-act="protokoll-neu-erstellen" data-b="${esc(id)}" data-id="${esc(p.id)}">Neu erstellen</button>` : ""}</div></div>`).join("") || `<div class="empty">Noch kein Protokoll.</div>`}</div>`;
   } else {
     body = `<div class="row"><button class="btn primary" data-act="beteiligte-waehlen">+ Aus Adressbuch</button><button class="btn" data-act="mail-alle">Beteiligtenliste an alle</button></div>
     ${[...groupBy(bet, "gewerk")].map(([g, ks]) => `<section class="group"><h3>${esc(g)}</h3>${ks.map((k) => contactCard(k, id)).join("")}</section>`).join("") || `<div class="empty">Noch keine Beteiligten. Tippe auf „Aus Adressbuch“.</div>`}`;
@@ -248,7 +250,7 @@ function viewBaustelle(id) {
 
 function entryCard(e) {
   const ks = (e.kontaktIds || []).map(kontakt).filter(Boolean);
-  return `<button class="card" data-act="eintrag-edit" data-id="${esc(e.id)}" data-b="${esc(e.baustelleId)}">
+  return `<button class="card" data-act="eintrag-edit" data-lp="eintrag" data-id="${esc(e.id)}" data-b="${esc(e.baustelleId)}">
     <div class="row"><span class="pill ${e.status === "erledigt" ? "erledigt" : "offen"}">${e.status === "erledigt" ? "erledigt" : "offen"}</span><span class="pill art">${esc(e.art || "Notiz")}</span>${e.nr ? `<span class="pill art">Nr. ${esc(e.nr)}</span>` : `<span class="pill art">neu</span>`}${e.mailGesendet ? `<span class="pill art">Mail ✓</span>` : ""}</div>
     <div class="title">${esc(e.titel || "Ohne Titel")}</div>
     <div class="meta"><span>${fmtDT(e.ts)}</span>${ks.length ? `<span>${esc(ks.map((k) => k.firma).join(", "))}</span>` : ""}${e.frist ? `<span>Frist ${fmtDate(e.frist)}</span>` : ""}</div>
@@ -848,9 +850,10 @@ async function protokollErstellen(bid) {
 }
 function protokollFertigSheet(bid, prot) {
   openSheet(`<div class="bar"><h2>Protokoll Nr. ${prot.nr} erstellt</h2><button class="iconbtn" data-act="close-sheet">×</button></div>
-    <div class="hint">Gespeichert in Dropbox unter Protokolle/${esc(prot.datei)}</div>
+    <div class="hint">☁ Wird automatisch in Dropbox gespeichert: 05-BAUSTELLE/Protokolle/${esc(prot.datei)} – auch ohne Senden.</div>
     <button class="btn big" data-act="protokoll-ansehen" data-b="${esc(bid)}" data-id="${esc(prot.id)}">Ansehen</button>
-    <button class="btn primary big" data-act="protokoll-senden" data-b="${esc(bid)}" data-id="${esc(prot.id)}">An alle senden</button>
+    <button class="btn primary big" data-act="protokoll-senden" data-b="${esc(bid)}" data-id="${esc(prot.id)}">Mail an alle vorbereiten (eM Client)</button>
+    <div class="hint">Öffnet nur den Entwurf in eM Client – gesendet wird erst, wenn du dort auf Senden tippst.</div>
     <div class="hint">Fehler gefunden? Schließen, den Punkt unter „Punkte“ korrigieren und im Tab „Protokolle“ auf „Neu erstellen“ tippen.</div>`);
 }
 async function protokollAnsehen(bid, pid) {
@@ -998,6 +1001,53 @@ async function pdfBeteiligte(b) {
   return rel;
 }
 
+// ---------- Lange drücken: Löschen ----------
+let lp = null;
+document.addEventListener("pointerdown", (ev) => {
+  const el = ev.target.closest("[data-lp]"); if (!el || ev.target.closest("[data-act]:not([data-lp])")) return;
+  lp = { el, x: ev.clientX, y: ev.clientY, t: setTimeout(() => { lp.fired = true; try { navigator.vibrate?.(30); } catch {} loeschenFragen(el.dataset.lp, el.dataset.b, el.dataset.id); }, 550) };
+});
+const lpAbbruch = (ev) => { if (!lp) return; if (ev.type === "pointermove" && Math.hypot(ev.clientX - lp.x, ev.clientY - lp.y) < 12) return; clearTimeout(lp.t); if (!lp.fired) lp = null; };
+for (const t of ["pointerup", "pointercancel", "pointermove"]) document.addEventListener(t, lpAbbruch, { passive: true });
+document.addEventListener("click", (ev) => { if (lp?.fired) { ev.stopImmediatePropagation(); ev.preventDefault(); lp = null; } }, true);
+document.addEventListener("contextmenu", (ev) => { if (ev.target.closest("[data-lp]")) ev.preventDefault(); });
+
+function loeschenFragen(art, bid, id) {
+  let titel, info;
+  if (art === "eintrag") {
+    const e = (S.eintraege[bid] || []).find((x) => x.id === id); if (!e) return;
+    titel = `Punkt löschen?`; info = `<b>${esc(e.nr ? e.nr + " " : "")}${esc(e.titel || "")}</b><div class="hint">Die Fotos bleiben in Dropbox erhalten.${e.protokollNr ? " In bereits erstellten Protokoll-PDFs bleibt der Punkt stehen." : ""}</div>`;
+  } else {
+    const p = (S.protokolle[bid] || []).find((x) => x.id === id); if (!p) return;
+    const letztes = protokolleVon(bid)[0]?.id === id;
+    titel = `Protokoll Nr. ${p.nr} löschen?`;
+    info = `<div>Vom ${fmtDate(p.datum)}. Das PDF wird auch aus Dropbox gelöscht.</div>${letztes ? `<div class="hint">Die Punkte daraus gelten danach wieder als „neu“ und kommen ins nächste Protokoll.</div>` : `<div class="hint">Es ist nicht das neueste Protokoll – die Nummerierung der späteren bleibt, wie sie ist.</div>`}`;
+  }
+  openSheet(`<div class="bar"><h2>${titel}</h2><button class="iconbtn" data-act="close-sheet">×</button></div>${info}
+    <button class="btn big danger" data-act="loeschen-ok" data-art="${art}" data-b="${esc(bid)}" data-id="${esc(id)}">Löschen</button>
+    <button class="btn big" data-act="close-sheet">Abbrechen</button>`);
+}
+async function loeschen(art, bid, id) {
+  if (art === "eintrag") {
+    const e = (S.eintraege[bid] || []).find((x) => x.id === id);
+    upsert(S.eintraege[bid], { ...e, geloescht: true });
+    toast("Punkt gelöscht");
+  } else {
+    const p = (S.protokolle[bid] || []).find((x) => x.id === id);
+    const letztes = protokolleVon(bid)[0]?.id === id;
+    upsert(S.protokolle[bid], { ...p, geloescht: true });
+    if (letztes) for (const e of S.eintraege[bid] || []) if (e.protokollNr === p.nr) { delete e.protokollNr; delete e.nr; upsert(S.eintraege[bid], e); }
+    S.queue = S.queue.filter((q) => q.name !== p.datei);
+    if (p.datei) {
+      if (S.lokal[p.datei]) { try { await Filesystem.deleteFile({ path: S.lokal[p.datei], directory: DATA }); } catch {} delete S.lokal[p.datei]; }
+      const b = baustelle(bid);
+      try { await Dropbox.rpc("files/delete_v2", { path: bPath(b, "/Protokolle/" + p.datei) }); } catch (e) { if (!e.notFound) toast("PDF in Dropbox konnte nicht gelöscht werden – bitte dort von Hand löschen"); }
+    }
+    toast("Protokoll gelöscht");
+  }
+  changed();
+}
+
 // ---------- Ereignisse ----------
 document.addEventListener("click", async (ev) => {
   if (V.eintragOffen && ev.target.closest("#sheet")) return;
@@ -1006,6 +1056,7 @@ document.addEventListener("click", async (ev) => {
   const act = t.dataset.act, id = t.dataset.id, r = route();
   switch (act) {
     case "close-sheet": closeSheet(); break;
+    case "loeschen-ok": closeSheet(); try { await loeschen(t.dataset.art, t.dataset.b, id); } catch (e) { toast("Löschen: " + (e.message || e)); } break;
     case "login":
       try { const url = await Dropbox.startLogin(); await Browser.open({ url }); } catch (e) { toast(e.message || String(e)); }
       break;
