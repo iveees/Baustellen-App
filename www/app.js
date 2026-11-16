@@ -695,6 +695,24 @@ async function claude(prompt, maxTokens = 4000, onFortschritt, { modelle = MODEL
   }
   throw letzter;
 }
+// Eine JSON-Zeile pro Objekt; eine abgeschnittene letzte Zeile wird einfach ignoriert
+function jsonZeilen(text) {
+  const out = [];
+  for (let z of String(text).split("\n")) {
+    z = z.trim().replace(/,$/, "");
+    if (!z.startsWith("{")) continue;
+    try {
+      const o = JSON.parse(z);
+      if (!o.typ && (o.ergaenzungen || o.neu)) out.push(...(o.ergaenzungen || []).map((x) => ({ typ: "ergaenzung", ...x })), ...(o.neu || []).map((x) => ({ typ: "neu", ...x })));
+      else out.push(o);
+    } catch {}
+  }
+  if (!out.length) {   // falls Claude doch ein Array geschickt hat
+    try { const a = jsonAus(text); const arr = Array.isArray(a) ? a : [...(a.ergaenzungen || []).map((x) => ({ typ: "ergaenzung", ...x })), ...(a.neu || []).map((x) => ({ typ: "neu", ...x }))]; if (arr.length) return arr; } catch {}
+    throw new Error("Antwort nicht lesbar" + (String(text).trim() ? "" : " (leer)"));
+  }
+  return out;
+}
 function jsonAus(text) {
   const t = String(text).replace(/^```(?:json)?\s*|\s*```$/g, "").trim();
   try { return JSON.parse(t); } catch {}
@@ -1160,7 +1178,7 @@ async function kontakteAbgleichen() {
   const handy = await handyKontakteLesen();
   const kand = kandidaten(handy, liste);
   if (!kand.length) throw new Error("Keine passenden Handykontakte gefunden");
-  const PORTION = 50, teile = Math.ceil(kand.length / PORTION);
+  const PORTION = 30, teile = Math.ceil(kand.length / PORTION);
   const r = { ergaenzungen: [], neu: [] };
   for (let t = 0; t < teile; t++) {
     const teil = kand.slice(t * PORTION, (t + 1) * PORTION);
@@ -1178,13 +1196,14 @@ async function kontakteAbgleichen() {
   2. neu: Handykontakte, die erkennbar Handwerker, Baufirmen, Techniker oder Planer sind (z. B. "Maler Tobias", "Baumeister Gius", "Fliesen Huber", Firmennamen mit Gewerk), aber in der Liste fehlen. Leite das Gewerk ab und verwende möglichst die Gewerk-Bezeichnungen der Liste. Private Kontakte ohne Bezug zum Bau weglassen.
   Bei unsicheren Zuordnungen "sicher": false.
 
-  Antworte nur mit JSON:
-  {"ergaenzungen":[{"id":"…","tel":["…"],"email":["…"],"handy":"Name des Handykontakts","sicher":true}],
-   "neu":[{"gewerk":"…","gruppe":"Firma|Techniker","firma":"…","person":"…","tel":["…"],"email":["…"],"handy":"Name des Handykontakts","sicher":true}]}`;
+  Antworte NUR mit JSON-Zeilen, genau ein Objekt pro Zeile, ohne Code-Block und ohne weiteren Text:
+  {"typ":"ergaenzung","id":"…","tel":["…"],"email":["…"],"handy":"Name des Handykontakts","sicher":true}
+  {"typ":"neu","gewerk":"…","gruppe":"Firma","firma":"…","person":"…","tel":["…"],"email":["…"],"handy":"Name des Handykontakts","sicher":true}
+  Wenn es nichts gibt, antworte mit genau einer Zeile: {"typ":"nichts"}`;
     let antwort, versuch = 0;
     for (;;) {
       try {
-        antwort = jsonAus(await claude(prompt, 3000, null, {
+        antwort = jsonZeilen(await claude(prompt, 8000, null, {
           modelle: ["claude-haiku-5-5", ...MODELLE],
           onWarten: (rest, st) => { V.kaStatus = `Teil ${t + 1} von ${teile}: ${st === 429 ? "Claude-Limit pro Minute erreicht" : "Claude ist ausgelastet"} – warte ${rest} s …`; sheetKontaktAbgleich(); },
         }));
@@ -1194,8 +1213,8 @@ async function kontakteAbgleichen() {
         V.kaStatus = `Teil ${t + 1} von ${teile}: ${e.message || "Fehler"} – neuer Versuch in 10 s …`; sheetKontaktAbgleich(); await new Promise((ok) => setTimeout(ok, 10000));
       }
     }
-    r.ergaenzungen.push(...(antwort.ergaenzungen || []));
-    for (const n of antwort.neu || []) if (!r.neu.some((x) => normFirma(x.firma) === normFirma(n.firma))) r.neu.push(n);
+    r.ergaenzungen.push(...antwort.filter((x) => x.typ === "ergaenzung"));
+    for (const n of antwort.filter((x) => x.typ === "neu")) if (!r.neu.some((x) => normFirma(x.firma) === normFirma(n.firma))) r.neu.push(n);
   }
   const ids = new Set(liste.map((k) => k.id));
   V.kaVorschlaege = {
