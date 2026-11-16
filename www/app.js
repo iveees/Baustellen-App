@@ -118,7 +118,7 @@ async function sync() {
     if (syncAgain) { syncAgain = false; scheduleSync(500); }
   }
 }
-const UNTERORDNER = { foto: "/Fotos/", pdf: "/Berichte/", protokoll: "/Protokolle/" };
+const UNTERORDNER = { foto: "/Fotos/", pdf: "/Berichte/", protokoll: "/Protokolle/", ordner: "/" };
 async function lokaleDatei(rel) {
   try { const r = await fetch(fileSrc(rel)); if (!r.ok) return null; const bl = await r.blob(); return bl.size ? bl : null; } catch { return null; }
 }
@@ -254,7 +254,7 @@ function viewBaustelle(id) {
       <div class="meta"><span>${p.punkte?.length || 0} ${p.punkte?.length === 1 ? "Punkt" : "Punkte"}</span>${p.verfasser ? `<span>${esc(p.verfasser)}</span>` : ""}<span>${S.queue.some((q) => q.name === p.datei) ? "⏳ wird in Dropbox gespeichert" : "☁ in Dropbox gespeichert"}</span></div>
       <div class="row"><button class="btn primary" data-act="protokoll-ansehen" data-b="${esc(id)}" data-id="${esc(p.id)}">Ansehen</button><button class="btn" data-act="protokoll-senden" data-b="${esc(id)}" data-id="${esc(p.id)}">Mail vorbereiten</button>${p.nr === prots[0].nr ? `<button class="btn" data-act="protokoll-neu-erstellen" data-b="${esc(id)}" data-id="${esc(p.id)}">Neu erstellen</button>` : ""}</div></div>`).join("") || `<div class="empty">Noch kein Protokoll.</div>`}</div>`;
   } else {
-    body = `<div class="row"><button class="btn primary" data-act="beteiligte-waehlen">+ Aus Adressbuch</button><button class="btn" data-act="mail-alle">Beteiligtenliste an alle</button></div>
+    body = `<div class="row"><button class="btn primary" data-act="beteiligte-waehlen">+ Aus Adressbuch</button><button class="btn" data-act="beteiligte-speichern">Liste in Dropbox speichern (PDF + Word)</button><button class="btn" data-act="mail-alle">Liste an alle (Mail vorbereiten)</button></div>
     ${[...groupBy(bet, "gewerk")].map(([g, ks]) => `<section class="group"><h3>${esc(g)}</h3>${ks.map((k) => contactCard(k, id)).join("")}</section>`).join("") || `<div class="empty">Noch keine Beteiligten. Tippe auf „Aus Adressbuch“.</div>`}`;
   }
   return `<div class="top"><a class="iconbtn" href="#start" aria-label="Zurück">←</a><div class="grow"><h1>${esc(b.name)}</h1><div class="sub">${esc([b.ort, b.bauherr && "Bauherr: " + b.bauherr].filter(Boolean).join(" · "))}</div></div><button class="iconbtn" data-act="baustelle-edit" data-id="${esc(id)}" aria-label="Bearbeiten">✎</button></div>
@@ -352,7 +352,7 @@ function sheetBaustelle(id) {
     $panel.innerHTML = `<div class="bar"><h2>${id ? "Baustelle bearbeiten" : "Neue Baustelle"}</h2><button class="iconbtn" data-act="close-sheet">×</button></div>
     <div class="box"><h3>Dropbox-Ordner</h3><div class="hint">Wähle im Projektordner den Baustellen-Ordner (z. B. <b>05-BAUSTELLE</b>). Dort landen Fotos und Berichte.</div>
       <div>${b.ordner ? "📁 " + esc(b.ordner.anzeige) : "<i>noch keiner gewählt</i>"}</div>${b.ordner?.privat ? `<div class="banner">Dieser Ordner ist nicht geteilt – dein Partner sieht ihn nicht.</div>` : ""}
-      <button class="btn" data-x="ordner">Ordner wählen</button></div>
+      <div class="row"><button class="btn" data-x="ordner">Ordner wählen</button>${b.ordner ? `<button class="btn" data-x="pruefen">In Dropbox prüfen</button>` : ""}</div><div id="b-diag" class="hint" style="white-space:pre-wrap;overflow-wrap:anywhere"></div></div>
     <label for="b-name">Name<input type="text" id="b-name" value="${esc(b.name || "")}" placeholder="z. B. Wohnhaus Pichler"></label>
     <label for="b-ort">Ort / Adresse<input type="text" id="b-ort" value="${esc(b.ort || "")}"></label>
     <label for="b-bauherr">Bauherr<input type="text" id="b-bauherr" value="${esc(b.bauherr || "")}"></label>
@@ -373,6 +373,23 @@ function sheetBaustelle(id) {
         if (!b.name) { const parts = ref.anzeige.split("/").filter(Boolean); b.name = parts.length > 1 && /baustelle/i.test(parts.at(-1)) ? parts.at(-2) : parts.at(-1); }
         sheetBaustelleReopen();
       });
+      return;
+    }
+    if (t.dataset.x === "pruefen") {
+      const out = document.getElementById("b-diag"); out.textContent = "Prüfe …";
+      try {
+        const zeilen = ["Pfad für die App: " + Dropbox.refPath(b.ordner)];
+        try { const m = await Dropbox.rpc("files/get_metadata", { path: Dropbox.refPath(b.ordner) }); zeilen.push("Ordner laut Dropbox: " + (m.path_display || "(geteilter Ordner, Pfad aus deiner Sicht unbekannt)")); } catch (e) { zeilen.push("Ordner: " + (e.summary || e.message)); }
+        for (const sub of ["", "/Fotos", "/Protokolle"]) {
+          try {
+            const r = await Dropbox.rpc("files/list_folder", { path: Dropbox.refPath(b.ordner, sub) });
+            zeilen.push("", (sub || "Ordner") + ": " + r.entries.length + " Einträge");
+            for (const e of r.entries.slice(0, 12)) zeilen.push("  " + e.name + (e.server_modified ? "  (" + new Date(e.server_modified).toLocaleString("de-DE") + ")" : ""));
+          } catch (e) { zeilen.push("", (sub || "Ordner") + ": " + (e.notFound ? "existiert nicht" : e.summary || e.message)); }
+        }
+        zeilen.push("", "Warteschlange: " + S.queue.filter((q) => q.bid === b.id).length + " Datei(en)");
+        out.textContent = zeilen.join("\n");
+      } catch (e) { out.textContent = "Fehler: " + (e.message || e); }
       return;
     }
     if (t.dataset.x === "save") {
@@ -1010,12 +1027,50 @@ async function pdfBeteiligte(b) {
   });
   const n = doc.getNumberOfPages();
   for (let i = 1; i <= n; i++) { doc.setPage(i); doc.setFontSize(8); doc.setTextColor(130); doc.text(`Seite ${i} von ${n}`, W - 15, doc.internal.pageSize.getHeight() - 8, { align: "right" }); }
-  const name = `Beteiligtenliste_${slug(b.name)}_${today()}.pdf`;
-  const rel = "pdf/" + name;
-  await Filesystem.writeFile({ path: rel, directory: DATA, data: doc.output("datauristring").split(",")[1] });
-  S.queue.push({ art: "pdf", bid: b.id, name, lokal: rel });
-  persist(); scheduleSync();
-  return rel;
+  return doc.output("datauristring").split(",")[1];
+}
+async function wordBeteiligte(b) {
+  const D = window.docx;
+  const ks = beteiligte(b);
+  const zelle = (txt, opt = {}) => new D.TableCell({
+    children: String(txt || "").split("\n").map((z) => new D.Paragraph({ children: [new D.TextRun({ text: z, size: 17, bold: !!opt.bold, color: opt.color })] })),
+    shading: opt.fill ? { fill: opt.fill, type: D.ShadingType.CLEAR, color: "auto" } : undefined,
+    margins: { top: 60, bottom: 60, left: 80, right: 80 },
+  });
+  const kopf = ["Gewerk", "Firma / Ansprechpartner", "Adresse", "Telefon", "E-Mail"].map((h) => zelle(h, { bold: true, fill: "1D2428", color: "FFFFFF" }));
+  const zeilen = ks.map((k, i) => new D.TableRow({ children: [
+    zelle(k.gewerk, { bold: true }), zelle(k.firma + (k.person ? "\n" + k.person : "")), zelle(k.adresse),
+    zelle((k.tel || []).map((t) => t.nr + (t.name ? " (" + t.name + ")" : "")).join("\n")),
+    zelle([...(k.email || []), ...(k.pec || []).map((x) => x + " (PEC)")].join("\n")),
+  ].map((c) => (i % 2 ? c : c)) }));
+  const doc = new D.Document({
+    styles: { default: { document: { run: { font: "Arial", size: 20 } } } },
+    sections: [{
+      properties: { page: { margin: { top: 1000, bottom: 1000, left: 900, right: 900 } } },
+      children: [
+        ...(einst().buero ? [new D.Paragraph({ children: [new D.TextRun({ text: einst().buero, size: 18, color: "6E6E6E" })] })] : []),
+        new D.Paragraph({ heading: D.HeadingLevel.HEADING_1, children: [new D.TextRun({ text: "Beteiligtenliste", bold: true, size: 36, color: "1D2428" })] }),
+        new D.Paragraph({ children: [new D.TextRun({ text: [b.name, b.ort, b.bauherr ? "Bauherr: " + b.bauherr : ""].filter(Boolean).join("  ·  "), size: 22 })] }),
+        new D.Paragraph({ spacing: { after: 200 }, children: [new D.TextRun({ text: "Stand: " + fmtDate(today()), size: 18, color: "6E6E6E" })] }),
+        new D.Table({ width: { size: 100, type: D.WidthType.PERCENTAGE }, columnWidths: [1700, 2400, 2100, 1700, 2400], rows: [new D.TableRow({ tableHeader: true, children: kopf }), ...zeilen] }),
+      ],
+    }],
+  });
+  return await D.Packer.toBase64String(doc);
+}
+// Beteiligtenliste als PDF und Word direkt in den Baustellen-Ordner (immer aktuelle Version, gleicher Name)
+async function beteiligteSpeichern(b) {
+  const basis = `Beteiligtenliste_${slug(b.name)}`;
+  const dateien = [[basis + ".pdf", await pdfBeteiligte(b)], [basis + ".docx", await wordBeteiligte(b)]];
+  for (const [name, data] of dateien) {
+    const rel = "pdf/" + name;
+    await Filesystem.writeFile({ path: rel, directory: DATA, data });
+    S.lokal[name] = rel;
+    S.queue = S.queue.filter((q) => !(q.name === name && q.bid === b.id));
+    S.queue.push({ art: "ordner", bid: b.id, name, lokal: rel });
+  }
+  persist(); scheduleSync(300);
+  return "pdf/" + basis + ".pdf";
 }
 
 // ---------- Lange drücken: Löschen ----------
@@ -1102,12 +1157,13 @@ document.addEventListener("click", async (ev) => {
     case "beteiligte-waehlen": sheetBeteiligte(r.id); break;
     case "beteiligte-ok": { const b = { ...baustelle(id), beteiligte: [...V.pickSel] }; closeSheet(); upsert(S.baustellen, b); changed(); break; }
     case "beteiligt-weg": { const b = baustelle(t.dataset.b); upsert(S.baustellen, { ...b, beteiligte: (b.beteiligte || []).filter((x) => x !== id) }); changed(); break; }
+    case "beteiligte-speichern": try { await beteiligteSpeichern(baustelle(r.id)); toast("Wird in Dropbox gespeichert: Beteiligtenliste als PDF und Word"); } catch (e) { console.error(e); toast("Speichern: " + (e.message || e)); } break;
     case "mail-einzel": openMail({ to: [t.dataset.to] }).catch((e) => toast(e.message || e)); break;
     case "mail-alle": {
       const b = baustelle(r.id); const addrs = beteiligte(b).map(firstMail).filter(Boolean);
       if (!addrs.length) { toast("Keine Adressen vorhanden"); break; }
       try {
-        const rel = await pdfBeteiligte(b); const it = einst().sprache === "Italienisch"; const du = einst().anrede === "Du";
+        const rel = await beteiligteSpeichern(b); const it = einst().sprache === "Italienisch"; const du = einst().anrede === "Du";
         const body = it ? `${du ? "Ciao a tutti" : "Gentili Signori"},\n\nin allegato l'elenco aggiornato dei partecipanti al cantiere ${b.name}.\n\n${einst().gruss || "Cordiali saluti"}`
           : `${du ? "Hallo zusammen" : "Sehr geehrte Damen und Herren"},\n\nanbei die aktuelle Beteiligtenliste für die Baustelle ${b.name}${b.ort ? " (" + b.ort + ")" : ""}.\n\n${einst().gruss || "Mit freundlichen Grüßen"}`;
         await openMail({ bcc: addrs, subject: (it ? "Elenco partecipanti " : "Beteiligtenliste ") + b.name, body, files: [rel] });
