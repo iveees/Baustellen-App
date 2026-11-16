@@ -10,7 +10,7 @@ const Filesystem = registerPlugin("Filesystem");
 const Browser = registerPlugin("Browser");
 const AppP = registerPlugin("App");
 const Network = registerPlugin("Network");
-const Speech = registerPlugin("SpeechRecognition");
+const DiktatP = registerPlugin("Diktat");
 const Mail = registerPlugin("Mail");
 const DATA = "DATA";
 
@@ -19,6 +19,9 @@ const S = {
   kontakte: [], baustellen: [], einst: [], eintraege: {},   // geteilt (Dropbox)
   lokal: {},        // Fotoname -> lokaler Pfad (nur dieses Gerät)
   queue: [],        // Uploads: {art:"foto"|"pdf", bid, name, lokal}
+  protokolle: {},   // geteilt, pro Baustelle
+  begehung: {},     // laufender Rundgang pro Baustelle (nur dieses Gerät)
+  meinName: "",
   auth: null, appOrdner: null, letzterSync: 0, syncFehler: "",
 };
 const V = { tab: "eintraege", filter: "offen", search: "", online: true, syncing: false, dataUri: "" };
@@ -102,6 +105,7 @@ async function sync() {
     for (const b of live(S.baustellen)) {
       if (!b.ordner) continue;
       await syncDoc(bPath(b, "/Baustellen-Doku.json"), () => S.eintraege[b.id] || [], (v) => (S.eintraege[b.id] = v));
+      await syncDoc(bPath(b, "/Baustellen-Protokolle.json"), () => S.protokolle[b.id] || [], (v) => (S.protokolle[b.id] = v));
     }
     await uploadQueue();
     S.letzterSync = Date.now(); S.syncFehler = "";
@@ -120,7 +124,7 @@ async function uploadQueue() {
     if (!b?.ordner) { rest.push(q); continue; }
     try {
       const blob = await (await fetch(fileSrc(q.lokal))).blob();
-      const sub = q.art === "pdf" ? "/Berichte/" : "/Fotos/";
+      const sub = q.art === "pdf" ? "/Berichte/" : q.art === "protokoll" ? "/Protokolle/" : "/Fotos/";
       await Dropbox.upload(bPath(b, sub + q.name), blob);
     } catch (e) { if (e.status) rest.push(q); else console.warn("Datei fehlt", q); }
   }
@@ -142,12 +146,12 @@ function fotoImg(bid, name, cls = "") {
   if (S.lokal[name]) return `<img class="${cls}" src="${esc(fileSrc(S.lokal[name]))}" alt="" loading="lazy">`;
   return `<img class="${cls}" data-remote="${esc(bid + "|" + name)}" alt="" src="data:image/gif;base64,R0lGODlhAQABAAAAACw=">`;
 }
-async function ensureLocal(bid, name) {
+async function ensureLocal(bid, name, ordner = "Fotos") {
   if (S.lokal[name]) return S.lokal[name];
   const b = baustelle(bid);
-  const bl = await Dropbox.download(bPath(b, "/Fotos/" + name));
-  if (!bl) throw new Error("Foto nicht gefunden: " + name);
-  const rel = "fotos/" + name;
+  const bl = await Dropbox.download(bPath(b, "/" + ordner + "/" + name));
+  if (!bl) throw new Error("Datei nicht gefunden: " + name);
+  const rel = (ordner === "Fotos" ? "fotos/" : "pdf/") + name;
   await Filesystem.writeFile({ path: rel, directory: DATA, data: await blobToB64(bl) });
   S.lokal[name] = rel; persist();
   return rel;
@@ -218,24 +222,34 @@ function viewBaustelle(id) {
   const es = eintraegeVon(id);
   const shown = V.filter === "offen" ? es.filter((e) => e.status !== "erledigt") : es;
   const bet = beteiligte(b);
+  const prots = protokolleVon(id);
+  const rg = S.begehung[id];
+  const neuSeitProt = es.filter((e) => !e.protokollNr).length;
   let body;
   if (V.tab === "eintraege") {
     body = `<div class="chips"><button class="chip" aria-pressed="${V.filter === "offen"}" data-act="filter" data-v="offen">Offen (${es.filter((e) => e.status !== "erledigt").length})</button><button class="chip" aria-pressed="${V.filter === "alle"}" data-act="filter" data-v="alle">Alle (${es.length})</button></div>
     <div class="stack">${shown.map((e) => entryCard(e)).join("") || `<div class="empty">${V.filter === "offen" ? "Keine offenen Punkte." : "Noch keine Einträge."}</div>`}</div>`;
+  } else if (V.tab === "protokolle") {
+    body = `<button class="btn primary" data-act="protokoll-neu" data-id="${esc(id)}">+ Protokoll erstellen</button>
+    <div class="stack">${prots.map((p) => `<div class="card"><div class="title">Protokoll Nr. ${p.nr} · ${fmtDate(p.datum)}</div>
+      <div class="meta"><span>${p.punkte?.length || 0} Punkte</span><span>${(p.anwesende || []).length} Anwesende</span>${p.verfasser ? `<span>${esc(p.verfasser)}</span>` : ""}</div>
+      <div class="row"><button class="btn" data-act="protokoll-senden" data-b="${esc(id)}" data-id="${esc(p.id)}">An alle senden</button></div></div>`).join("") || `<div class="empty">Noch kein Protokoll.</div>`}</div>`;
   } else {
     body = `<div class="row"><button class="btn primary" data-act="beteiligte-waehlen">+ Aus Adressbuch</button><button class="btn" data-act="mail-alle">Beteiligtenliste an alle</button></div>
     ${[...groupBy(bet, "gewerk")].map(([g, ks]) => `<section class="group"><h3>${esc(g)}</h3>${ks.map((k) => contactCard(k, id)).join("")}</section>`).join("") || `<div class="empty">Noch keine Beteiligten. Tippe auf „Aus Adressbuch“.</div>`}`;
   }
   return `<div class="top"><a class="iconbtn" href="#start" aria-label="Zurück">←</a><div class="grow"><h1>${esc(b.name)}</h1><div class="sub">${esc([b.ort, b.bauherr && "Bauherr: " + b.bauherr].filter(Boolean).join(" · "))}</div></div><button class="iconbtn" data-act="baustelle-edit" data-id="${esc(id)}" aria-label="Bearbeiten">✎</button></div>
-    ${b.ordner ? `<div class="hint">📁 ${esc(b.ordner.anzeige || "")}${b.ordner.privat ? " – nicht geteilt, dein Partner sieht das nicht" : ""}</div>` : `<div class="banner">Für diese Baustelle ist noch kein Dropbox-Ordner gewählt. Tippe auf ✎.</div>`}
-    <button class="btn primary big" data-act="eintrag-neu" data-id="${esc(id)}">● Neuer Eintrag</button>
-    <div class="seg"><button aria-pressed="${V.tab === "eintraege"}" data-act="tab" data-v="eintraege">Einträge</button><button aria-pressed="${V.tab === "beteiligte"}" data-act="tab" data-v="beteiligte">Beteiligte (${bet.length})</button></div>
+    ${b.ordner ? "" : `<div class="banner">Für diese Baustelle ist noch kein Dropbox-Ordner gewählt. Tippe auf ✎.</div>`}
+    <button class="btn primary big" data-act="begehung" data-id="${esc(id)}">${rg ? `▶ Begehung fortsetzen (${rg.punkte.filter(punktHatInhalt).length} Punkte)` : "▶ Begehung starten"}</button>
+    <div class="row"><button class="btn" style="flex:1" data-act="eintrag-neu" data-id="${esc(id)}">+ Einzelner Eintrag</button>${neuSeitProt ? `<button class="btn" style="flex:1" data-act="protokoll-neu" data-id="${esc(id)}">Protokoll erstellen (${neuSeitProt} neu)</button>` : ""}</div>
+    <div class="seg" style="grid-template-columns:1fr 1fr 1fr"><button aria-pressed="${V.tab === "eintraege"}" data-act="tab" data-v="eintraege">Punkte</button><button aria-pressed="${V.tab === "protokolle"}" data-act="tab" data-v="protokolle">Protokolle</button><button aria-pressed="${V.tab === "beteiligte"}" data-act="tab" data-v="beteiligte">Beteiligte</button></div>
     ${body}`;
 }
+
 function entryCard(e) {
   const ks = (e.kontaktIds || []).map(kontakt).filter(Boolean);
   return `<button class="card" data-act="eintrag-edit" data-id="${esc(e.id)}" data-b="${esc(e.baustelleId)}">
-    <div class="row"><span class="pill ${e.status === "erledigt" ? "erledigt" : "offen"}">${e.status === "erledigt" ? "erledigt" : "offen"}</span><span class="pill art">${esc(e.art || "Notiz")}</span>${e.mailGesendet ? `<span class="pill art">Mail ✓</span>` : ""}</div>
+    <div class="row"><span class="pill ${e.status === "erledigt" ? "erledigt" : "offen"}">${e.status === "erledigt" ? "erledigt" : "offen"}</span><span class="pill art">${esc(e.art || "Notiz")}</span>${e.nr ? `<span class="pill art">Nr. ${esc(e.nr)}</span>` : `<span class="pill art">neu</span>`}${e.mailGesendet ? `<span class="pill art">Mail ✓</span>` : ""}</div>
     <div class="title">${esc(e.titel || "Ohne Titel")}</div>
     <div class="meta"><span>${fmtDT(e.ts)}</span>${ks.length ? `<span>${esc(ks.map((k) => k.firma).join(", "))}</span>` : ""}${e.frist ? `<span>Frist ${fmtDate(e.frist)}</span>` : ""}</div>
     ${(e.fotos || []).length ? `<div class="thumbs">${e.fotos.slice(0, 6).map((f) => fotoImg(e.baustelleId, f)).join("")}</div>` : ""}
@@ -261,13 +275,18 @@ function viewSettings() {
   const f = (id, label, val, ph = "") => `<label for="${id}">${label}<input type="text" id="${id}" value="${esc(val || "")}" placeholder="${esc(ph)}"></label>`;
   return `<div class="top"><div class="grow"><h1>Einstellungen</h1></div></div>
   <form class="card stack" id="settings-form">
-    <h2>Mails und PDFs</h2>
+    <h2>Mails und Protokolle</h2>
+    ${f("s-meinname", "Dein Name (als Verfasser im Protokoll, nur auf diesem Handy)", S.meinName)}
     ${f("s-buero", "Büro (oben auf PDFs)", s.buero)}
     ${f("s-gruss", "Grußformel vor deiner eM-Client-Signatur", s.gruss, "Mit freundlichen Grüßen")}
     <label for="s-anrede">Anrede<select id="s-anrede"><option value="Sie">Sie</option><option value="Du" ${s.anrede === "Du" ? "selected" : ""}>Du</option></select></label>
-    <label for="s-sprache">Sprache der Mails<select id="s-sprache">${["Deutsch", "Italienisch"].map((l) => `<option ${(s.sprache || "Deutsch") === l ? "selected" : ""}>${l}</option>`).join("")}</select></label>
+    <label for="s-sprache">Sprache von Mails und Protokollen<select id="s-sprache">${["Deutsch", "Italienisch"].map((l) => `<option ${(s.sprache || "Deutsch") === l ? "selected" : ""}>${l}</option>`).join("")}</select></label>
     <label for="s-diktat">Sprache beim Sprechen<select id="s-diktat">${[["de-DE", "Deutsch"], ["it-IT", "Italienisch"]].map(([v, l]) => `<option value="${v}" ${(s.diktat || "de-DE") === v ? "selected" : ""}>${l}</option>`).join("")}</select></label>
-    <button class="btn primary" type="submit">Speichern</button>
+    <label for="s-fotos">Fotos im Protokoll<select id="s-fotos"><option value="punkt">beim jeweiligen Punkt</option><option value="ende" ${s.fotos === "ende" ? "selected" : ""}>gesammelt am Ende</option><option value="keine" ${s.fotos === "keine" ? "selected" : ""}>keine Fotos</option></select></label>
+    <h2 style="margin-top:8px">Zusammenfassen mit Claude</h2>
+    <label for="s-apikey">API-Schlüssel von Anthropic (beginnt mit sk-ant-)<input type="text" id="s-apikey" value="${esc(s.apiKey || "")}" autocomplete="off" autocapitalize="off" spellcheck="false"></label>
+    <div class="hint">Wird über euren Dropbox-Ordner mit deinem Partner geteilt. Ohne Schlüssel übernimmt die App deinen Text unverändert.</div>
+    <div class="row"><button class="btn primary" type="submit">Speichern</button><button class="btn" type="button" data-act="ki-test">Schlüssel testen</button></div>
   </form>
   <div class="card stack"><h2>Dropbox</h2>
     <div>Angemeldet als <b>${esc(S.auth?.name || "")}</b> ${esc(S.auth?.email || "")}</div>
@@ -426,8 +445,10 @@ function sheetEintrag(bid, eid) {
       <div class="row"><button class="btn primary" data-x="kamera">Foto aufnehmen</button><button class="btn" data-x="galerie">Aus Galerie</button></div>
     </div>
     <div class="box"><h3>Beschreibung</h3>
-      <button class="mic" data-x="mic"><span class="dot"></span>Sprechen</button>
+      <button class="mic ${Diktat.aktiv ? "on" : ""}" data-x="mic"><span class="dot"></span>${Diktat.aktiv ? "Aufnahme läuft · tippen = fertig" : "Sprechen"}</button>
+      <div class="partial" id="e-partial"></div>
       <textarea id="e-text" placeholder="z. B. Im Bad OG ist die Silikonfuge an der Dusche gerissen.">${esc(E.text)}</textarea>
+      <button class="btn" data-x="aufbereiten">${einst().apiKey ? "✦ Aufbereiten: Titel, Zuständig, Frist, Mail" : "Zuständig aus dem Text erkennen"}</button><div class="hint" id="e-ki"></div>
       <label for="e-titel">Titel (kurz)<input type="text" id="e-titel" value="${esc(E.titel)}" placeholder="wird sonst aus dem Text genommen"></label>
       <div class="chips">${ART.map((a) => `<button class="chip" data-x="art" data-v="${a}" aria-pressed="${E.art === a}">${a}</button>`).join("")}</div>
     </div>
@@ -465,12 +486,14 @@ function sheetEintrag(bid, eid) {
     for (const name of neueFotos) S.queue.push({ art: "foto", bid, name, lokal: S.lokal[name] });
     neueFotos.length = 0;
     S.eintraege[bid] = S.eintraege[bid] || [];
+    if (E.status === "erledigt" && !E.erledigtAm) E.erledigtAm = Date.now();
+    if (E.status !== "erledigt") delete E.erledigtAm;
     upsert(S.eintraege[bid], { ...E, geaendert: Date.now() });
     changed();
     return true;
   };
 
-  openSheet("", () => {});
+  openSheet("", () => { if (Diktat.aktiv) Diktat.stop(); });
   V.eintragOffen = true;
   $panel.onclick = async (ev) => {
     const t = ev.target.closest("[data-x]"); if (!t) return;
@@ -489,13 +512,27 @@ function sheetEintrag(bid, eid) {
     }
     if (x === "mic") {
       read();
+      if (Diktat.aktiv) { await Diktat.stop(); return; }
+      Diktat.start({
+        append: (txt) => { const ta = document.getElementById("e-text"); if (!ta) return; ta.value = satzAnhaengen(ta.value, txt); E.text = ta.value; },
+        partial: (txt) => { const el = document.getElementById("e-partial"); if (el) el.textContent = txt; },
+        state: () => { read(); draw(); },
+      });
+      return;
+    }
+    if (x === "aufbereiten") {
+      read();
+      if (Diktat.aktiv) await Diktat.stop();
+      if (!E.text.trim()) { toast("Erst etwas sprechen oder schreiben"); return; }
+      const st = document.getElementById("e-ki"); if (st) st.textContent = einst().apiKey ? "Claude fasst zusammen …" : "";
       try {
-        const perm = await Speech.requestPermissions();
-        if (perm.speechRecognition && perm.speechRecognition !== "granted") { toast("Mikrofon nicht erlaubt"); return; }
-        const r = await Speech.start({ language: einst().diktat || "de-DE", maxResults: 1, prompt: "Sprechen …", partialResults: false, popup: true });
-        const txt = (r.matches || [])[0];
-        if (txt) { const satz = txt.charAt(0).toUpperCase() + txt.slice(1); E.text = E.text ? E.text.replace(/\s*$/, "") + (/[.!?]$/.test(E.text.trim()) ? " " : ". ") + satz : satz; draw(); }
-      } catch (e) { if (!/cancel|no match|didn/i.test(e.message || "")) toast("Sprechen: " + (e.message || e)); }
+        const [r] = await punkteAufbereiten(b, [{ i: 0, text: E.text, fotos: E.fotos.length }], { mitMail: true });
+        read();
+        if (r.titel) E.titel = r.titel; if (ART.includes(r.art)) E.art = r.art; if (r.beschreibung) E.text = r.beschreibung;
+        if (r.kontaktIds?.length) E.kontaktIds = r.kontaktIds; if (r.frist) E.frist = r.frist;
+        if (r.mail?.text) E.mail = { betreff: r.mail.betreff || E.mail.betreff, text: r.mail.text + "\n\n" + (einst().gruss || "Mit freundlichen Grüßen") };
+        draw(); toast("Ausgefüllt – bitte kurz prüfen");
+      } catch (e) { const st2 = document.getElementById("e-ki"); if (st2) st2.textContent = "Zusammenfassen nicht möglich: " + (e.message || e); }
       return;
     }
     if (x === "art") { read(); E.art = t.dataset.v; draw(); return; }
@@ -535,6 +572,368 @@ function sheetEintrag(bid, eid) {
     }
   };
   draw();
+}
+
+// ---------- Diktat (durchgehend, auch bei Sprechpausen) ----------
+const Diktat = {
+  aktiv: false, ziel: null, bereit: false,
+  async init() {
+    if (!NATIVE || this.bereit) return;
+    this.bereit = true;
+    DiktatP.addListener("partial", (e) => this.ziel?.partial?.(e.text || ""));
+    DiktatP.addListener("final", (e) => { this.ziel?.partial?.(""); if (e.text) this.ziel?.append?.(e.text); });
+    DiktatP.addListener("state", (e) => { const war = this.aktiv; this.aktiv = !!e.active; if (war !== this.aktiv) this.ziel?.state?.(this.aktiv); });
+    DiktatP.addListener("error", (e) => { this.aktiv = false; toast("Sprechen: " + (e.message || "Fehler")); this.ziel?.state?.(false); });
+  },
+  async start(ziel) {
+    this.ziel = ziel;
+    if (!NATIVE) { toast("Sprechen geht nur in der App"); return; }
+    try { await DiktatP.start({ language: einst().diktat || "de-DE" }); }
+    catch (e) { toast(e.message || String(e)); }
+  },
+  async stop() { if (NATIVE) { try { await DiktatP.stop(); } catch {} } this.aktiv = false; },
+};
+function satzAnhaengen(alt, neu) {
+  neu = String(neu).trim(); if (!neu) return alt;
+  neu = neu.charAt(0).toUpperCase() + neu.slice(1);
+  if (!/[.!?]$/.test(neu)) neu += ".";
+  alt = String(alt || "").replace(/\s+$/, "");
+  return alt ? alt + " " + neu : neu;
+}
+
+// ---------- Claude: Punkte zusammenfassen ----------
+const MODELLE = ["claude-sonnet-5-5", "claude-haiku-5-5"];
+async function claude(prompt, maxTokens = 4000) {
+  const key = (einst().apiKey || "").trim();
+  if (!key) throw new Error("Kein API-Schlüssel eingetragen");
+  let letzter;
+  for (const model of MODELLE) {
+    const r = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json", "anthropic-dangerous-direct-browser-access": "true" },
+      body: JSON.stringify({ model, max_tokens: maxTokens, messages: [{ role: "user", content: prompt }] }),
+    });
+    if (r.ok) { const j = await r.json(); return (j.content || []).map((c) => c.text || "").join(""); }
+    let msg = ""; try { msg = (await r.json()).error?.message || ""; } catch {}
+    letzter = new Error(r.status === 401 ? "API-Schlüssel ungültig" : r.status === 400 && /credit/i.test(msg) ? "Guthaben bei Anthropic aufgebraucht" : `Fehler ${r.status} ${msg}`);
+    if (r.status !== 404 && !/model/i.test(msg)) break;
+  }
+  throw letzter;
+}
+function jsonAus(text) {
+  const t = String(text).replace(/^```(?:json)?\s*|\s*```$/g, "").trim();
+  try { return JSON.parse(t); } catch {}
+  const a = t.search(/[[{]/), z = Math.max(t.lastIndexOf("]"), t.lastIndexOf("}"));
+  if (a >= 0 && z > a) return JSON.parse(t.slice(a, z + 1));
+  throw new Error("Antwort nicht lesbar");
+}
+// Ohne Claude: Zuständige über Gewerk-Stichwörter erkennen
+const STICHWORTE = [
+  [/fliese|fliesen|piastrell|silikon|fuge/i, /fliesen/i],
+  [/elektr|steckdose|schalter|licht|lampe|kabel|strom|elettric/i, /elektr/i],
+  [/hydraul|install|sanit|wasser|heizung|abfluss|rohr|idraul/i, /hydraul/i],
+  [/maler|gips|anstrich|ausmal|spachtel|pittor|cartongesso/i, /maler|gips/i],
+  [/fenster|finestr/i, /fenster/i], [/t[üu]r|porta/i, /t[üu]ren|tischler/i], [/tischler|m[öo]bel|küche/i, /tischler/i],
+  [/zimmer|dach|holzbau|tetto/i, /zimmer/i], [/schlosser|geländer|metall|fabbro/i, /schlosser/i],
+  [/maurer|baufirma|baumeister|beton|mauer|estrich|muratore|impresa/i, /baufirma|baumeister/i],
+  [/bagger|erdarbeit|aushub|scavo/i, /erdarbeit/i], [/markise|rollo|raffstore|verschatt|tenda/i, /verschatt/i],
+  [/photovoltaik|\bpv\b|wärmepumpe|fotovolt/i, /photovoltaik/i], [/statik|statiker/i, /statiker/i],
+];
+function zustaendigRaten(text, bet) {
+  const treffer = new Set();
+  for (const k of bet) {
+    if (k.firma && new RegExp("\\b" + k.firma.split(/\s+/)[0].replace(/[^\wäöüÄÖÜß]/g, ""), "i").test(text)) treffer.add(k.id);
+    if (k.person && k.person.length > 2 && new RegExp("\\b" + k.person.split(/\s+/)[0], "i").test(text)) treffer.add(k.id);
+  }
+  if (!treffer.size) for (const [wort, gewerk] of STICHWORTE) if (wort.test(text)) for (const k of bet) if (gewerk.test(k.gewerk)) treffer.add(k.id);
+  return [...treffer];
+}
+async function punkteAufbereiten(b, punkte, { mitMail = false } = {}) {
+  const bet = beteiligte(b);
+  if (!(einst().apiKey || "").trim()) {
+    return punkte.map((p) => ({ i: p.i, titel: p.text.split(/[.\n,]/)[0].trim().slice(0, 60), art: "Mangel", beschreibung: p.text, kontaktIds: zustaendigRaten(p.text, bet), frist: "" }));
+  }
+  const it = einst().sprache === "Italienisch";
+  const d = new Date();
+  const prompt = `Du bist Bauleiter in Südtirol und schreibst ein Baustellenprotokoll.
+Heute ist ${d.toLocaleDateString("de-DE", { weekday: "long", day: "2-digit", month: "2-digit", year: "numeric" })} (ISO ${today()}).
+Baustelle: ${b.name}${b.ort ? ", " + b.ort : ""}.
+Beteiligte (id | Gewerk | Firma | Ansprechpartner):
+${bet.map((k) => `${k.id} | ${k.gewerk} | ${k.firma} | ${k.person || "-"}`).join("\n") || "(keine)"}
+
+Diktierte Punkte (Spracherkennung, kann Hör- und Grammatikfehler enthalten):
+${punkte.map((p) => `[${p.i}] ${p.text}${p.fotos ? ` (${p.fotos} Foto${p.fotos > 1 ? "s" : ""})` : ""}`).join("\n")}
+
+Mache aus jedem Punkt genau einen Protokollpunkt:
+- titel: kurz, höchstens 8 Wörter
+- art: "Mangel", "Aufgabe" oder "Notiz"
+- beschreibung: sachlich und knapp im Protokollstil, 1–3 Sätze, ${it ? "auf Italienisch" : "auf Deutsch"}; Diktierfehler und Füllwörter korrigieren, nichts dazuerfinden
+- kontaktIds: ids der zuständigen Beteiligten (über Gewerk, Firmen- oder Personennamen), sonst []
+- frist: YYYY-MM-DD, wenn eine Frist genannt ist (z. B. "bis Freitag" relativ zu heute), sonst ""
+${mitMail ? `- mail: {"betreff": "...", "text": "..."} an die Zuständigen, ${it ? "auf Italienisch" : "auf Deutsch"}, Anrede ${einst().anrede === "Du" ? "per Du" : "per Sie"} (mit Namen des Ansprechpartners, falls bekannt), kurz und freundlich, mit Baustelle, Problem und Frist; ${punkte[0]?.fotos ? "Hinweis auf Fotos im Anhang; " : ""}OHNE Grußformel und Signatur am Ende` : ""}
+Antworte nur mit einem JSON-Array: [{"i":0,"titel":"","art":"Mangel","beschreibung":"","kontaktIds":[],"frist":""${mitMail ? ',"mail":{"betreff":"","text":""}' : ""}}]`;
+  const arr = jsonAus(await claude(prompt, 1500 + punkte.length * 400));
+  const ids = new Set(bet.map((k) => k.id));
+  return punkte.map((p) => {
+    const r = (Array.isArray(arr) ? arr : []).find((x) => +x.i === p.i) || {};
+    return { i: p.i, titel: String(r.titel || p.text.slice(0, 60)), art: ART.includes(r.art) ? r.art : "Mangel", beschreibung: String(r.beschreibung || p.text),
+      kontaktIds: (r.kontaktIds || []).map(String).filter((id) => ids.has(id)), frist: /^\d{4}-\d{2}-\d{2}$/.test(r.frist || "") ? r.frist : "", mail: r.mail };
+  });
+}
+
+// ---------- Begehung (Rundgang) ----------
+const punktHatInhalt = (p) => (p.text || "").trim() || (p.fotos || []).length;
+function sheetBegehung(bid) {
+  const b = baustelle(bid);
+  let R = S.begehung[bid];
+  const bet = beteiligte(b);
+  const speichern = () => { S.begehung[bid] = R; persist(); };
+  const aktuell = () => R.punkte[R.idx];
+
+  const drawStart = () => {
+    const sel = new Set(R?.anwesende || []);
+    $panel.innerHTML = `<div class="bar"><h2>Begehung starten</h2><button class="iconbtn" data-x="close">×</button></div>
+      <div class="sub">${esc(b.name)} · ${fmtDate(today())}</div>
+      <div class="box"><h3>Anwesend</h3><div class="chips">${bet.map((k) => `<button class="chip" data-x="anw" data-id="${esc(k.id)}" aria-pressed="${sel.has(k.id)}">${esc(k.gewerk)}: ${esc(k.firma)}</button>`).join("") || `<span class="hint">Keine Beteiligten gewählt.</span>`}</div>
+        <label for="r-sonst">Weitere Anwesende (Freitext)<input type="text" id="r-sonst" value="${esc(R?.sonstige || "")}" placeholder="z. B. Bauherr Fam. Dorfer"></label>
+        <label for="r-wetter">Wetter (optional)<input type="text" id="r-wetter" value="${esc(R?.wetter || "")}" placeholder="z. B. sonnig, 8 °C"></label></div>
+      <button class="btn primary big" data-x="los">Los geht's</button>`;
+    $panel._anw = sel;
+  };
+  const drawAufnahme = () => {
+    const p = aktuell(); const n = R.idx + 1;
+    $panel.innerHTML = `<div class="bar"><h2>Punkt ${n}</h2><button class="btn" data-x="beenden">Beenden</button><button class="iconbtn" data-x="close" aria-label="Pause">⏸</button></div>
+      <div class="box">
+        <div class="photos">${p.fotos.map((f, i) => `<div class="photo">${fotoImg(bid, f)}<button data-x="foto-weg" data-i="${i}" aria-label="Foto entfernen">×</button></div>`).join("")}</div>
+        <div class="row"><button class="btn primary" style="flex:2" data-x="kamera">📷 Foto</button><button class="btn" style="flex:1" data-x="galerie">Galerie</button></div>
+      </div>
+      <button class="mic ${Diktat.aktiv ? "on" : ""}" data-x="mic"><span class="dot"></span>${Diktat.aktiv ? "Aufnahme läuft · tippen = fertig" : "Sprechen"}</button>
+      <div class="partial" id="r-partial"></div>
+      <textarea id="r-text" placeholder="z. B. Fliesenleger, im Bad OG ist die Silikonfuge gerissen, bis Freitag richten">${esc(p.text)}</textarea>
+      <button class="btn primary big" data-x="weiter">Nächster Punkt ›</button>
+      ${R.punkte.length > 1 ? `<div class="stack"><div class="hint">Bisher erfasst – antippen zum Ändern</div>${R.punkte.map((q, i) => `<button class="punkt ${i === R.idx ? "aktuell" : ""}" data-x="springe" data-i="${i}"><span><span class="nr">${i + 1}.</span> ${esc((q.text || "").slice(0, 90) || "(ohne Text)")}</span><span class="hint">${q.fotos.length} Foto${q.fotos.length === 1 ? "" : "s"}</span></button>`).join("")}</div>` : ""}`;
+  };
+  const leseText = () => { const ta = document.getElementById("r-text"); if (ta && R) { aktuell().text = ta.value; speichern(); } };
+  const addFoto = async (path) => {
+    const name = `${today()}_${slug(b.name)}_${Date.now().toString(36)}.jpg`;
+    const rel = "fotos/" + name;
+    await Filesystem.copy({ from: path, to: rel, toDirectory: DATA });
+    S.lokal[name] = rel; aktuell().fotos.push(name); speichern();
+  };
+  const neuerPunkt = () => { R.punkte.push({ id: newId("p"), text: "", fotos: [], ts: Date.now() }); R.idx = R.punkte.length - 1; speichern(); };
+
+  openSheet("", () => { if (Diktat.aktiv) Diktat.stop(); });
+  V.eintragOffen = true;
+  $panel.onclick = async (ev) => {
+    const t = ev.target.closest("[data-x]"); if (!t) return;
+    const x = t.dataset.x;
+    if (x === "close") { leseText(); closeSheet(); render(); return; }
+    if (x === "anw") { const id = t.dataset.id; const sel = $panel._anw; sel.has(id) ? sel.delete(id) : sel.add(id); t.setAttribute("aria-pressed", sel.has(id)); return; }
+    if (x === "los") {
+      R = { id: newId("g"), datum: today(), start: Date.now(), anwesende: [...$panel._anw], sonstige: document.getElementById("r-sonst").value.trim(), wetter: document.getElementById("r-wetter").value.trim(), punkte: [], idx: 0 };
+      neuerPunkt(); drawAufnahme(); return;
+    }
+    if (x === "kamera") {
+      leseText();
+      try { const ph = await Camera.getPhoto({ quality: 80, width: 1800, resultType: "uri", source: "CAMERA", correctOrientation: true, saveToGallery: false }); await addFoto(ph.path); drawAufnahme(); }
+      catch (e) { if (!/cancel/i.test(e.message || "")) toast("Kamera: " + (e.message || e)); }
+      return;
+    }
+    if (x === "galerie") {
+      leseText();
+      try { const r = await Camera.pickImages({ quality: 80, width: 1800, limit: 10 }); for (const ph of r.photos) await addFoto(ph.path); drawAufnahme(); }
+      catch (e) { if (!/cancel/i.test(e.message || "")) toast("Galerie: " + (e.message || e)); }
+      return;
+    }
+    if (x === "foto-weg") { leseText(); aktuell().fotos.splice(+t.dataset.i, 1); speichern(); drawAufnahme(); return; }
+    if (x === "mic") {
+      leseText();
+      if (Diktat.aktiv) { await Diktat.stop(); return; }
+      Diktat.start({
+        append: (txt) => { const ta = document.getElementById("r-text"); if (!ta) return; ta.value = satzAnhaengen(ta.value, txt); aktuell().text = ta.value; speichern(); },
+        partial: (txt) => { const el = document.getElementById("r-partial"); if (el) el.textContent = txt; },
+        state: () => { leseText(); drawAufnahme(); },
+      });
+      return;
+    }
+    if (x === "weiter") {
+      if (Diktat.aktiv) await Diktat.stop();
+      leseText();
+      if (!punktHatInhalt(aktuell())) { toast("Dieser Punkt ist noch leer"); return; }
+      const leer = R.punkte.findIndex((q, i) => i !== R.idx && !punktHatInhalt(q));
+      if (leer >= 0) R.idx = leer; else neuerPunkt();
+      drawAufnahme(); $panel.scrollTop = 0; return;
+    }
+    if (x === "springe") { if (Diktat.aktiv) await Diktat.stop(); leseText(); R.idx = +t.dataset.i; speichern(); drawAufnahme(); $panel.scrollTop = 0; return; }
+    if (x === "beenden") {
+      if (Diktat.aktiv) await Diktat.stop();
+      leseText();
+      const punkte = R.punkte.filter(punktHatInhalt);
+      if (!punkte.length) { delete S.begehung[bid]; persist(); closeSheet(); render(); return; }
+      t.disabled = true;
+      $panel.innerHTML = `<div class="bar"><h2>Begehung auswerten</h2></div><div class="empty">${einst().apiKey ? "Claude fasst " + punkte.length + " Punkte zusammen …<br>(dauert ca. 10–30 Sekunden)" : "Punkte werden übernommen …"}</div>`;
+      let res;
+      try { res = await punkteAufbereiten(b, punkte.map((q, i) => ({ i, text: q.text || "(nur Foto)", fotos: q.fotos.length }))); }
+      catch (e) {
+        toast("Zusammenfassen nicht möglich – Text wird unverändert übernommen (" + (e.message || e) + ")");
+        res = punkte.map((q, i) => ({ i, titel: (q.text || "Foto").split(/[.\n,]/)[0].slice(0, 60), art: "Mangel", beschreibung: q.text, kontaktIds: zustaendigRaten(q.text || "", bet), frist: "" }));
+      }
+      S.eintraege[bid] = S.eintraege[bid] || [];
+      punkte.forEach((q, i) => {
+        const r = res[i] || {};
+        const E = { id: newId("e"), baustelleId: bid, ts: q.ts || Date.now(), begehungId: R.id, titel: r.titel, art: r.art || "Mangel", text: r.beschreibung || q.text, diktat: q.text,
+          kontaktIds: r.kontaktIds || [], frist: r.frist || "", status: "offen", fotos: q.fotos, mail: { betreff: "", text: "" }, mailGesendet: false };
+        upsert(S.eintraege[bid], E);
+        for (const name of q.fotos) S.queue.push({ art: "foto", bid, name, lokal: S.lokal[name] });
+      });
+      S.letzteBegehung = S.letzteBegehung || {};
+      S.letzteBegehung[bid] = { id: R.id, datum: R.datum, anwesende: R.anwesende, sonstige: R.sonstige, wetter: R.wetter };
+      delete S.begehung[bid];
+      closeSheet(); V.tab = "eintraege"; V.filter = "offen"; changed();
+      toast(punkte.length + " Punkte übernommen – kurz prüfen, dann Protokoll erstellen");
+      return;
+    }
+  };
+  if (R) drawAufnahme(); else drawStart();
+}
+
+// ---------- Protokoll ----------
+const protokolleVon = (bid) => live(S.protokolle[bid] || []).sort((a, b) => b.nr - a.nr);
+function protokollPunkte(bid) {
+  const letztes = protokolleVon(bid)[0];
+  return eintraegeVon(bid).reverse().filter((e) => e.status !== "erledigt" || !e.protokollNr || (letztes && (e.erledigtAm || 0) > (letztes.erstellt || 0)));
+}
+function sheetProtokoll(bid) {
+  const b = baustelle(bid); const bet = beteiligte(b);
+  const nr = (protokolleVon(bid)[0]?.nr || 0) + 1;
+  const lb = S.letzteBegehung?.[bid] || {};
+  const sel = new Set(lb.anwesende || []);
+  const punkte = protokollPunkte(bid);
+  openSheet(`<div class="bar"><h2>Protokoll Nr. ${nr}</h2><button class="iconbtn" data-act="close-sheet">×</button></div>
+    <label for="p-datum">Datum der Begehung<input type="date" id="p-datum" value="${esc(lb.datum || today())}"></label>
+    <div class="box"><h3>Anwesend</h3><div class="chips">${bet.map((k) => `<button class="chip" data-pa="${esc(k.id)}" aria-pressed="${sel.has(k.id)}">${esc(k.gewerk)}: ${esc(k.firma)}</button>`).join("")}</div>
+      <label for="p-sonst">Weitere Anwesende<input type="text" id="p-sonst" value="${esc(lb.sonstige || "")}"></label>
+      <label for="p-wetter">Wetter<input type="text" id="p-wetter" value="${esc(lb.wetter || "")}"></label></div>
+    <div class="box"><h3>Inhalt: ${punkte.length} Punkte</h3><div class="hint">${punkte.filter((e) => !e.protokollNr).length} neu · ${punkte.filter((e) => e.protokollNr && e.status !== "erledigt").length} weiterhin offen · ${punkte.filter((e) => e.status === "erledigt").length} erledigt</div></div>
+    <button class="btn primary big" data-act="protokoll-go" data-id="${esc(bid)}" data-senden="1">PDF erstellen und an alle senden</button>
+    <button class="btn" data-act="protokoll-go" data-id="${esc(bid)}">Nur PDF erstellen</button>`);
+  V.protSel = sel;
+  $panel.onclick = (ev) => { const c = ev.target.closest("[data-pa]"); if (!c) return; const id = c.dataset.pa; sel.has(id) ? sel.delete(id) : sel.add(id); c.setAttribute("aria-pressed", sel.has(id)); };
+}
+async function protokollErstellen(bid, senden) {
+  const b = baustelle(bid);
+  const nr = (protokolleVon(bid)[0]?.nr || 0) + 1;
+  const punkte = protokollPunkte(bid);
+  const prot = { id: newId("pr"), nr, datum: document.getElementById("p-datum").value || today(), anwesende: [...V.protSel],
+    sonstige: document.getElementById("p-sonst").value.trim(), wetter: document.getElementById("p-wetter").value.trim(), verfasser: S.meinName || S.auth?.name || "", erstellt: Date.now(), punkte: [] };
+  closeSheet(); toast("Protokoll wird erstellt …");
+  let lauf = 0;
+  for (const e of punkte) {
+    if (!e.protokollNr) { lauf++; e.nr = `${nr}.${String(lauf).padStart(2, "0")}`; e.protokollNr = nr; upsert(S.eintraege[bid], e); }
+    prot.punkte.push(e.id);
+  }
+  // Fotos des Partners für das PDF holen
+  if (einst().fotos !== "keine") for (const e of punkte) for (const f of e.fotos || []) { try { await ensureLocal(bid, f); } catch {} }
+  const name = `Protokoll_${String(nr).padStart(2, "0")}_${slug(b.name)}_${prot.datum}.pdf`;
+  prot.datei = name;
+  const rel = "pdf/" + name;
+  await Filesystem.writeFile({ path: rel, directory: DATA, data: await pdfProtokoll(b, prot, punkte) });
+  S.lokal[name] = rel;
+  S.protokolle[bid] = S.protokolle[bid] || [];
+  upsert(S.protokolle[bid], prot);
+  S.queue.push({ art: "protokoll", bid, name, lokal: rel });
+  if (S.letzteBegehung) delete S.letzteBegehung[bid];
+  V.tab = "protokolle"; changed();
+  if (senden) await protokollSenden(bid, prot.id);
+  else toast("Protokoll gespeichert (Dropbox: Protokolle)");
+}
+async function protokollSenden(bid, pid) {
+  const b = baustelle(bid); const prot = (S.protokolle[bid] || []).find((p) => p.id === pid);
+  const rel = await ensureLocal(bid, prot.datei, "Protokolle");
+  const addrs = beteiligte(b).map(firstMail).filter(Boolean);
+  const it = einst().sprache === "Italienisch"; const du = einst().anrede === "Du";
+  const offen = (prot.punkte || []).map((id) => (S.eintraege[bid] || []).find((e) => e.id === id)).filter((e) => e && e.status !== "erledigt").length;
+  const body = it
+    ? `${du ? "Ciao a tutti" : "Gentili Signori"},\n\nin allegato il verbale di cantiere n. ${prot.nr} del ${fmtDate(prot.datum)} per il cantiere ${b.name}.\nPunti aperti: ${offen}. ${du ? "Vi prego" : "Vi preghiamo"} di rispettare le scadenze indicate.\n\n${einst().gruss || "Cordiali saluti"}`
+    : `${du ? "Hallo zusammen" : "Sehr geehrte Damen und Herren"},\n\nanbei das Baustellenprotokoll Nr. ${prot.nr} vom ${fmtDate(prot.datum)} zur Baustelle ${b.name}.\nOffene Punkte: ${offen}. ${du ? "Bitte haltet" : "Wir bitten um Einhaltung"} der angegebenen Fristen${du ? " ein" : ""}.\n\n${einst().gruss || "Mit freundlichen Grüßen"}`;
+  await openMail({ bcc: addrs, subject: (it ? `Verbale di cantiere n. ${prot.nr} – ` : `Baustellenprotokoll Nr. ${prot.nr} – `) + b.name, body, files: [rel] });
+}
+async function pdfProtokoll(b, prot, punkte) {
+  const it = einst().sprache === "Italienisch";
+  const L = it ? { titel: "Verbale di cantiere", nr: "n.", datum: "Sopralluogo del", anw: "Presenti", wetter: "Meteo", verf: "Redatto da", zust: "Competenza", frist: "Scadenza", offen: "aperto", erl: "completato", neu: "nuovo", seit: "dal verbale", allg: "Generale", uebers: "Riepilogo", fotos: "Foto" }
+    : { titel: "Baustellenprotokoll", nr: "Nr.", datum: "Begehung am", anw: "Anwesend", wetter: "Wetter", verf: "Verfasst von", zust: "Zuständig", frist: "Frist", offen: "offen", erl: "erledigt", neu: "neu", seit: "seit Protokoll", allg: "Allgemein", uebers: "Übersicht", fotos: "Fotos" };
+  const doc = new window.jspdf.jsPDF({ unit: "mm", format: "a4" });
+  const W = doc.internal.pageSize.getWidth(), H = doc.internal.pageSize.getHeight(), X = 15, CW = W - 30;
+  let y;
+  const need = (h) => { if (y + h > H - 15) { doc.addPage(); y = 18; } };
+  const text = (str, size = 10, style = "normal", color = 30) => { doc.setFont("helvetica", style); doc.setFontSize(size); doc.setTextColor(color); };
+  // Kopf
+  text("", 9, "normal", 110);
+  if (einst().buero) doc.text(pdfSafe(einst().buero), X, 14);
+  doc.text(fmtDate(today()), W - X, 14, { align: "right" });
+  text("", 18, "bold", 20); doc.text(pdfSafe(`${L.titel} ${L.nr} ${prot.nr}`), X, 26);
+  text("", 11.5, "bold", 20); doc.text(pdfSafe([b.name, b.ort].filter(Boolean).join("  ·  ")), X, 33);
+  doc.setDrawColor(232, 163, 23); doc.setLineWidth(0.8); doc.line(X, 37, W - X, 37);
+  y = 44;
+  const zeile = (label, wert) => { if (!wert) return; text("", 9.5, "bold", 60); doc.text(pdfSafe(label + ":"), X, y); text("", 9.5, "normal", 30); const l = doc.splitTextToSize(pdfSafe(wert), CW - 32); doc.text(l, X + 32, y); y += l.length * 4.3 + 1.2; };
+  zeile(L.datum.replace(/ am$| del$/, ""), fmtDate(prot.datum));
+  zeile(L.anw, [...prot.anwesende.map(kontakt).filter(Boolean).map((k) => k.firma + (k.person ? " (" + k.person + ")" : "")), prot.sonstige].filter(Boolean).join(", "));
+  zeile(L.wetter, prot.wetter);
+  zeile(L.verf, prot.verfasser);
+  const anzahl = { neu: punkte.filter((e) => e.protokollNr === prot.nr).length, offen: punkte.filter((e) => e.status !== "erledigt").length, erl: punkte.filter((e) => e.status === "erledigt").length };
+  zeile(L.uebers, `${anzahl.neu} ${L.neu} · ${anzahl.offen} ${L.offen} · ${anzahl.erl} ${L.erl}`);
+  y += 3;
+  // Punkte nach Gewerk
+  const gruppe = (e) => { const k = (e.kontaktIds || []).map(kontakt).filter(Boolean)[0]; return k ? k.gewerk : L.allg; };
+  const order = beteiligte(b).map((k) => k.gewerk);
+  const gruppen = [...groupBy(punkte.map((e) => ({ ...e, _g: gruppe(e) })), "_g")].sort((a, c) => ((a[0] === L.allg) - (c[0] === L.allg)) || (order.indexOf(a[0]) - order.indexOf(c[0])));
+  const fotoModus = einst().fotos || "punkt";
+  const alleFotos = [];
+  const bild = async (name) => { const rel = S.lokal[name]; if (!rel) return null; try { const bl = await (await fetch(fileSrc(rel))).blob(); const bmp = await createImageBitmap(bl); return { url: "data:image/jpeg;base64," + await blobToB64(bl), w: bmp.width, h: bmp.height }; } catch { return null; } };
+  const fotoReihe = async (namen, breite) => {
+    const proZeile = Math.max(1, Math.floor((CW + 4) / (breite + 4)));
+    for (let i = 0; i < namen.length; i += proZeile) {
+      const bilder = (await Promise.all(namen.slice(i, i + proZeile).map(bild))).filter(Boolean);
+      if (!bilder.length) continue;
+      const hs = bilder.map((p) => Math.min(breite * p.h / p.w, breite * 1.1)); const rowH = Math.max(...hs);
+      need(rowH + 2);
+      bilder.forEach((p, j) => { const h = hs[j]; doc.addImage(p.url, "JPEG", X + j * (breite + 4), y, h * p.w / p.h, h); });
+      y += rowH + 3;
+    }
+  };
+  for (const [g, es] of gruppen) {
+    need(14);
+    doc.setFillColor(29, 36, 40); doc.rect(X, y - 4.5, CW, 7, "F");
+    text("", 10.5, "bold", 255); doc.text(pdfSafe(g), X + 2, y);
+    y += 6;
+    for (const e of es) {
+      const ks = (e.kontaktIds || []).map(kontakt).filter(Boolean);
+      need(16);
+      text("", 10.5, "bold", 20); doc.text(pdfSafe(e.nr || ""), X, y);
+      const tl = doc.splitTextToSize(pdfSafe(e.titel || ""), CW - 50); doc.text(tl, X + 15, y);
+      const st = e.status === "erledigt" ? L.erl : L.offen;
+      if (e.status === "erledigt") doc.setTextColor(47, 122, 79); else doc.setTextColor(180, 71, 31);
+      doc.text(pdfSafe(st.toUpperCase()), W - X, y, { align: "right" });
+      y += tl.length * 4.8;
+      text("", 9, "normal", 90);
+      const meta = [ks.length ? `${L.zust}: ${ks.map((k) => k.firma).join(", ")}` : "", e.frist ? `${L.frist}: ${fmtDate(e.frist)}` : "", e.protokollNr && e.protokollNr !== prot.nr ? `${L.seit} ${e.protokollNr}` : ""].filter(Boolean).join("   ·   ");
+      if (meta) { const ml = doc.splitTextToSize(pdfSafe(meta), CW - 15); doc.text(ml, X + 15, y); y += ml.length * 4 + 0.5; }
+      text("", 10, "normal", 30);
+      for (const line of doc.splitTextToSize(pdfSafe(e.text || ""), CW - 15)) { need(5); doc.text(line, X + 15, y); y += 4.6; }
+      const fotos = (e.fotos || []).filter((f) => S.lokal[f]);
+      if (fotos.length && fotoModus === "punkt") { y += 1.5; const xs = X; await (async () => { const alt = X; await fotoReihe(fotos, 52); })(); }
+      if (fotos.length && fotoModus === "ende") { alleFotos.push([e.nr, fotos]); text("", 9, "italic", 110); doc.text(pdfSafe(`${L.fotos}: ${fotos.length}`), X + 15, y); y += 4.5; }
+      y += 2.5; doc.setDrawColor(220); doc.setLineWidth(0.2); doc.line(X + 15, y - 1.5, W - X, y - 1.5); y += 2;
+    }
+    y += 2;
+  }
+  if (fotoModus === "ende" && alleFotos.length) {
+    doc.addPage(); y = 20; text("", 14, "bold", 20); doc.text(pdfSafe(L.fotos), X, y); y += 8;
+    for (const [nr, fotos] of alleFotos) { need(10); text("", 10, "bold", 20); doc.text(pdfSafe(nr || ""), X, y); y += 4; await fotoReihe(fotos, 84); }
+  }
+  const n = doc.getNumberOfPages();
+  for (let i = 1; i <= n; i++) { doc.setPage(i); text("", 8, "normal", 130); doc.text(pdfSafe(`${b.name} · ${L.titel} ${L.nr} ${prot.nr} · ${i}/${n}`), W - X, H - 8, { align: "right" }); }
+  return doc.output("datauristring").split(",")[1];
 }
 
 // ---------- PDF Beteiligtenliste ----------
@@ -588,6 +987,17 @@ document.addEventListener("click", async (ev) => {
     case "tab": V.tab = t.dataset.v; render(); break;
     case "filter": V.filter = t.dataset.v; render(); break;
     case "eintrag-neu": sheetEintrag(id, null); break;
+    case "begehung": sheetBegehung(id); break;
+    case "protokoll-neu": sheetProtokoll(id); break;
+    case "protokoll-go": try { await protokollErstellen(id, !!t.dataset.senden); } catch (e) { console.error(e); toast("Protokoll: " + (e.message || e)); } break;
+    case "protokoll-senden": try { await protokollSenden(t.dataset.b, id); } catch (e) { toast("Senden: " + (e.message || e)); } break;
+    case "ki-test": {
+      const key = document.getElementById("s-apikey")?.value.trim();
+      if (key) upsert(S.einst, { ...einst(), id: "allgemein", apiKey: key });
+      t.disabled = true; t.textContent = "Teste …";
+      try { await claude("Antworte nur mit: OK", 10); toast("Schlüssel funktioniert ✓"); persist(); scheduleSync(); } catch (e) { toast(e.message || String(e)); }
+      t.disabled = false; t.textContent = "Schlüssel testen"; break;
+    }
     case "eintrag-edit": sheetEintrag(t.dataset.b, id); break;
     case "beteiligte-waehlen": sheetBeteiligte(r.id); break;
     case "beteiligte-ok": { const b = { ...baustelle(id), beteiligte: [...V.pickSel] }; closeSheet(); upsert(S.baustellen, b); changed(); break; }
@@ -620,7 +1030,8 @@ document.addEventListener("submit", (ev) => {
     closeSheet(); changed(); toast("Kontakt gespeichert");
   }
   if (f.id === "settings-form") {
-    upsert(S.einst, { ...einst(), id: "allgemein", buero: v("s-buero"), gruss: v("s-gruss"), anrede: v("s-anrede"), sprache: v("s-sprache"), diktat: v("s-diktat") });
+    S.meinName = v("s-meinname");
+    upsert(S.einst, { ...einst(), id: "allgemein", buero: v("s-buero"), gruss: v("s-gruss"), anrede: v("s-anrede"), sprache: v("s-sprache"), diktat: v("s-diktat"), fotos: v("s-fotos"), apiKey: v("s-apikey") });
     changed(); toast("Gespeichert");
   }
 });
@@ -633,6 +1044,7 @@ window.addEventListener("hashchange", () => { closeSheet(); window.scrollTo(0, 0
   Dropbox.onAuth((a) => { S.auth = a; persist(); render(); });
   render();
   if (!NATIVE) return;
+  Diktat.init();
   AppP.addListener("appUrlOpen", async ({ url }) => {
     if (!url.startsWith("baustellendoku://oauth")) return;
     try { await Browser.close(); } catch {}
