@@ -233,7 +233,7 @@ function viewBaustelle(id) {
     body = `<button class="btn primary" data-act="protokoll-neu" data-id="${esc(id)}">+ Protokoll erstellen</button>
     <div class="stack">${prots.map((p) => `<div class="card"><div class="title">Protokoll Nr. ${p.nr} · ${fmtDate(p.datum)}</div>
       <div class="meta"><span>${p.punkte?.length || 0} Punkte</span><span>${(p.anwesende || []).length} Anwesende</span>${p.verfasser ? `<span>${esc(p.verfasser)}</span>` : ""}</div>
-      <div class="row"><button class="btn" data-act="protokoll-senden" data-b="${esc(id)}" data-id="${esc(p.id)}">An alle senden</button></div></div>`).join("") || `<div class="empty">Noch kein Protokoll.</div>`}</div>`;
+      <div class="row"><button class="btn primary" data-act="protokoll-ansehen" data-b="${esc(id)}" data-id="${esc(p.id)}">Ansehen</button><button class="btn" data-act="protokoll-senden" data-b="${esc(id)}" data-id="${esc(p.id)}">An alle senden</button>${p.nr === prots[0].nr ? `<button class="btn" data-act="protokoll-neu-erstellen" data-b="${esc(id)}" data-id="${esc(p.id)}">Neu erstellen</button>` : ""}</div></div>`).join("") || `<div class="empty">Noch kein Protokoll.</div>`}</div>`;
   } else {
     body = `<div class="row"><button class="btn primary" data-act="beteiligte-waehlen">+ Aus Adressbuch</button><button class="btn" data-act="mail-alle">Beteiligtenliste an alle</button></div>
     ${[...groupBy(bet, "gewerk")].map(([g, ks]) => `<section class="group"><h3>${esc(g)}</h3>${ks.map((k) => contactCard(k, id)).join("")}</section>`).join("") || `<div class="empty">Noch keine Beteiligten. Tippe auf „Aus Adressbuch“.</div>`}`;
@@ -815,12 +815,12 @@ function sheetProtokoll(bid) {
       <label for="p-sonst">Weitere Anwesende<input type="text" id="p-sonst" value="${esc(lb.sonstige || "")}"></label>
       <label for="p-wetter">Wetter<input type="text" id="p-wetter" value="${esc(lb.wetter || "")}"></label></div>
     <div class="box"><h3>Inhalt: ${punkte.length} Punkte</h3><div class="hint">${punkte.filter((e) => !e.protokollNr).length} neu · ${punkte.filter((e) => e.protokollNr && e.status !== "erledigt").length} weiterhin offen · ${punkte.filter((e) => e.status === "erledigt").length} erledigt</div></div>
-    <button class="btn primary big" data-act="protokoll-go" data-id="${esc(bid)}" data-senden="1">PDF erstellen und an alle senden</button>
-    <button class="btn" data-act="protokoll-go" data-id="${esc(bid)}">Nur PDF erstellen</button>`);
+    <button class="btn primary big" data-act="protokoll-go" data-id="${esc(bid)}">PDF erstellen</button>
+    <div class="hint">Danach kannst du es ansehen und erst dann an alle senden.</div>`);
   V.protSel = sel;
   $panel.onclick = (ev) => { const c = ev.target.closest("[data-pa]"); if (!c) return; const id = c.dataset.pa; sel.has(id) ? sel.delete(id) : sel.add(id); c.setAttribute("aria-pressed", sel.has(id)); };
 }
-async function protokollErstellen(bid, senden) {
+async function protokollErstellen(bid) {
   const b = baustelle(bid);
   const nr = (protokolleVon(bid)[0]?.nr || 0) + 1;
   const punkte = protokollPunkte(bid);
@@ -844,8 +844,38 @@ async function protokollErstellen(bid, senden) {
   S.queue.push({ art: "protokoll", bid, name, lokal: rel });
   if (S.letzteBegehung) delete S.letzteBegehung[bid];
   V.tab = "protokolle"; changed();
-  if (senden) await protokollSenden(bid, prot.id);
-  else toast("Protokoll gespeichert (Dropbox: Protokolle)");
+  protokollFertigSheet(bid, prot);
+}
+function protokollFertigSheet(bid, prot) {
+  openSheet(`<div class="bar"><h2>Protokoll Nr. ${prot.nr} erstellt</h2><button class="iconbtn" data-act="close-sheet">×</button></div>
+    <div class="hint">Gespeichert in Dropbox unter Protokolle/${esc(prot.datei)}</div>
+    <button class="btn big" data-act="protokoll-ansehen" data-b="${esc(bid)}" data-id="${esc(prot.id)}">Ansehen</button>
+    <button class="btn primary big" data-act="protokoll-senden" data-b="${esc(bid)}" data-id="${esc(prot.id)}">An alle senden</button>
+    <div class="hint">Fehler gefunden? Schließen, den Punkt unter „Punkte“ korrigieren und im Tab „Protokolle“ auf „Neu erstellen“ tippen.</div>`);
+}
+async function protokollAnsehen(bid, pid) {
+  const prot = (S.protokolle[bid] || []).find((p) => p.id === pid);
+  const rel = await ensureLocal(bid, prot.datei, "Protokolle");
+  if (!NATIVE) { window.open(fileSrc(rel)); return; }
+  await Mail.open({ path: absPath(rel), mime: "application/pdf" });
+}
+async function protokollNeuErstellen(bid, pid) {
+  const b = baustelle(bid);
+  const prot = { ...(S.protokolle[bid] || []).find((p) => p.id === pid) };
+  const punkte = prot.punkte.map((id) => (S.eintraege[bid] || []).find((e) => e.id === id)).filter((e) => e && !e.geloescht);
+  // neue Punkte seit dem Erstellen dieses Protokolls ebenfalls aufnehmen
+  let lauf = punkte.filter((e) => e.protokollNr === prot.nr).length;
+  for (const e of eintraegeVon(bid).reverse()) if (!e.protokollNr) { lauf++; e.nr = `${prot.nr}.${String(lauf).padStart(2, "0")}`; e.protokollNr = prot.nr; upsert(S.eintraege[bid], e); punkte.push(e); prot.punkte.push(e.id); }
+  toast("Protokoll wird neu erstellt …");
+  if (einst().fotos !== "keine") for (const e of punkte) for (const f of e.fotos || []) { try { await ensureLocal(bid, f); } catch {} }
+  const rel = "pdf/" + prot.datei;
+  await Filesystem.writeFile({ path: rel, directory: DATA, data: await pdfProtokoll(b, prot, punkte) });
+  S.lokal[prot.datei] = rel;
+  upsert(S.protokolle[bid], prot);
+  S.queue = S.queue.filter((q) => q.name !== prot.datei);
+  S.queue.push({ art: "protokoll", bid, name: prot.datei, lokal: rel });
+  changed();
+  protokollFertigSheet(bid, prot);
 }
 async function protokollSenden(bid, pid) {
   const b = baustelle(bid); const prot = (S.protokolle[bid] || []).find((p) => p.id === pid);
@@ -989,7 +1019,9 @@ document.addEventListener("click", async (ev) => {
     case "eintrag-neu": sheetEintrag(id, null); break;
     case "begehung": sheetBegehung(id); break;
     case "protokoll-neu": sheetProtokoll(id); break;
-    case "protokoll-go": try { await protokollErstellen(id, !!t.dataset.senden); } catch (e) { console.error(e); toast("Protokoll: " + (e.message || e)); } break;
+    case "protokoll-go": try { await protokollErstellen(id); } catch (e) { console.error(e); toast("Protokoll: " + (e.message || e)); } break;
+    case "protokoll-ansehen": try { await protokollAnsehen(t.dataset.b, id); } catch (e) { toast("Ansehen: " + (e.message || e)); } break;
+    case "protokoll-neu-erstellen": try { await protokollNeuErstellen(t.dataset.b, id); } catch (e) { console.error(e); toast("Neu erstellen: " + (e.message || e)); } break;
     case "protokoll-senden": try { await protokollSenden(t.dataset.b, id); } catch (e) { toast("Senden: " + (e.message || e)); } break;
     case "ki-test": {
       const key = document.getElementById("s-apikey")?.value.trim();

@@ -36,6 +36,7 @@ public class DiktatPlugin extends Plugin {
     private boolean active = false;
     private String language = "de-DE";
     private int fehlerInFolge = 0;
+    private String lastPartial = "";
 
     @PluginMethod
     public void start(PluginCall call) {
@@ -61,6 +62,7 @@ public class DiktatPlugin extends Plugin {
             }
             active = true;
             fehlerInFolge = 0;
+            lastPartial = "";
             hoeren();
             status();
             call.resolve();
@@ -72,8 +74,8 @@ public class DiktatPlugin extends Plugin {
         main.post(() -> {
             active = false;
             if (recognizer != null) recognizer.stopListening();
-            // Falls keine Ergebnisse mehr kommen, nach kurzer Zeit aufräumen
-            main.postDelayed(this::aufraeumen, 2500);
+            // Falls kein Endergebnis mehr kommt: zuletzt gezeigten Text übernehmen
+            main.postDelayed(() -> { uebernehmen(""); aufraeumen(); }, 1500);
             status();
             call.resolve();
         });
@@ -134,6 +136,16 @@ public class DiktatPlugin extends Plugin {
         aufraeumen();
     }
 
+    /** Endergebnis melden; ist es leer, den zuletzt live gezeigten Text nehmen. */
+    private void uebernehmen(String t) {
+        if (t == null || t.trim().isEmpty()) t = lastPartial;
+        lastPartial = "";
+        if (t == null || t.trim().isEmpty()) return;
+        JSObject o = new JSObject();
+        o.put("text", t);
+        notifyListeners("final", o);
+    }
+
     private static String erster(Bundle b) {
         ArrayList<String> m = b.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
         return (m != null && !m.isEmpty()) ? m.get(0) : "";
@@ -149,26 +161,24 @@ public class DiktatPlugin extends Plugin {
 
         @Override
         public void onPartialResults(Bundle b) {
+            String t = erster(b);
+            if (!t.trim().isEmpty()) lastPartial = t;
             JSObject o = new JSObject();
-            o.put("text", erster(b));
+            o.put("text", t);
             notifyListeners("partial", o);
         }
 
         @Override
         public void onResults(Bundle b) {
             fehlerInFolge = 0;
-            String t = erster(b);
-            if (!t.isEmpty()) {
-                JSObject o = new JSObject();
-                o.put("text", t);
-                notifyListeners("final", o);
-            }
+            uebernehmen(erster(b));
             if (active) neuStarten(50);
             else { status(); aufraeumen(); }
         }
 
         @Override
         public void onError(int code) {
+            uebernehmen("");
             if (!active) { status(); aufraeumen(); return; }
             switch (code) {
                 case SpeechRecognizer.ERROR_NO_MATCH:

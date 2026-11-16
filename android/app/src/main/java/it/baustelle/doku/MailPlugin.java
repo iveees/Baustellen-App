@@ -23,6 +23,25 @@ import java.util.ArrayList;
 @CapacitorPlugin(name = "Mail")
 public class MailPlugin extends Plugin {
 
+    /** Datei in einer passenden App öffnen (z. B. PDF-Anzeige). */
+    @PluginMethod
+    public void open(PluginCall call) {
+        try {
+            String p = call.getString("path", "");
+            if (p.startsWith("file://")) p = Uri.parse(p).getPath();
+            File f = new File(p);
+            if (!f.exists()) { call.reject("Datei nicht gefunden"); return; }
+            Uri uri = FileProvider.getUriForFile(getContext(), getContext().getPackageName() + ".fileprovider", f);
+            Intent i = new Intent(Intent.ACTION_VIEW);
+            i.setDataAndType(uri, call.getString("mime", "application/pdf"));
+            i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            getActivity().startActivity(Intent.createChooser(i, "Öffnen mit …"));
+            call.resolve();
+        } catch (Exception e) {
+            call.reject("Kann die Datei nicht öffnen: " + e.getMessage());
+        }
+    }
+
     private static final String EM_CLIENT = "com.emclient.mailclient";
 
     @PluginMethod
