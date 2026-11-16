@@ -282,7 +282,7 @@ function contactCard(k, bid) {
   const mails = (k.email || []).map((m) => `<a data-k="@" href="#" data-act="mail-einzel" data-to="${esc(m)}">${esc(m)}</a>`).join("");
   const pecs = (k.pec || []).map((m) => `<a data-k="P" href="#" data-act="mail-einzel" data-to="${esc(m)}">${esc(m)} (PEC)</a>`).join("");
   return `<div class="contact"><div class="head"><div class="grow"><div class="firma">${esc(k.firma)}</div>${k.person ? `<div class="sub">${esc(k.person)}</div>` : ""}</div>
-    ${bid ? `<button class="iconbtn" data-act="beteiligt-weg" data-b="${esc(bid)}" data-id="${esc(k.id)}" aria-label="Entfernen">×</button>` : `<button class="iconbtn" data-act="kontakt-edit" data-id="${esc(k.id)}" aria-label="Bearbeiten">✎</button>`.replace(/^.*$/s, (x) => (k.quelle === "word" ? "" : x))}</div>
+    ${bid ? `<button class="iconbtn" data-act="beteiligt-weg" data-b="${esc(bid)}" data-id="${esc(k.id)}" aria-label="Entfernen">×</button>` : `<button class="iconbtn" data-act="kontakt-edit" data-id="${esc(k.id)}" aria-label="Bearbeiten">✎</button>`}</div>
     <div class="links">${tels}${mails}${pecs}</div>${k.notiz ? `<div class="hint">${esc(k.notiz)}</div>` : ""}</div>`;
 }
 function viewAdressbuch() {
@@ -291,9 +291,9 @@ function viewAdressbuch() {
   const w = einst().wordName; const wd = V.wordDatei;
   const wordKarte = wd || w ? `<div class="card"><div>${w ? `Quelle: Word-Liste <b>${esc(w)}</b>` : `Word-Liste gefunden: <b>${esc(wd.name)}</b>`}</div>
       <div class="hint">${w ? `Eingelesen: Stand ${einst().wordStand ? fmtDT(einst().wordStand) : "?"}. ` : ""}${wd?.neu ? `<b style="color:var(--open)">In Dropbox liegt eine neuere Version (${fmtDT(wd.stand)}).</b> ` : w ? "Aktuell. " : ""}Einlesen kostet ein paar Cent (Claude).</div>
-      <div class="row"><button class="btn ${wd?.neu ? "primary" : ""}" data-act="word-neu">Word-Liste einlesen</button>${w ? `<button class="btn" data-act="kontakt-abgleich">Mit Handykontakten abgleichen</button>` : ""}</div><div class="hint">Kontakte bitte in der Word-Datei ändern, nicht hier.</div></div>`
+      <div class="row"><button class="btn ${wd?.neu ? "primary" : ""}" data-act="word-neu">Word-Liste einlesen</button><button class="btn" data-act="kontakt-abgleich">Mit Handykontakten abgleichen</button></div><div class="hint">Neue Kontakte und neue Nummern/Mails aus der App werden automatisch in die Word-Datei geschrieben. Andere Änderungen (Name, Adresse) bitte direkt in Word.</div></div>`
     : `<div class="hint">Tipp: Lege eure Word-Liste der Firmen in den gemeinsamen App-Ordner. Dann kannst du sie hier mit einem Knopf einlesen.</div>`;
-  return `<div class="top"><div class="grow"><h1>Adressbuch</h1><div class="sub">${live(S.kontakte).length} Kontakte</div></div>${w ? "" : `<button class="btn primary" data-act="kontakt-neu">+ Neu</button>`}</div>
+  return `<div class="top"><div class="grow"><h1>Adressbuch</h1><div class="sub">${live(S.kontakte).length} Kontakte</div></div><button class="btn primary" data-act="kontakt-neu">+ Neu</button></div>
     ${wordKarte}
     <input type="search" id="search" placeholder="Suchen: Firma, Name, Gewerk …" value="${esc(V.search)}" autocomplete="off">
     ${[...groupBy(all, "gewerk")].map(([g, ks]) => `<section class="group"><h3>${esc(g)} (${ks.length})</h3>${ks.map((k) => contactCard(k)).join("")}</section>`).join("") || `<div class="empty">Nichts gefunden.</div>`}`;
@@ -1178,9 +1178,9 @@ function sheetKontaktAbgleich() {
   };
 }
 // Word-Datei bearbeiten: Absätze einfügen, Format der Nachbarzeile übernehmen
-async function inWordSchreiben() {
+async function inWordSchreiben(ersIn, neuIn, { mitziehen = true } = {}) {
   const v = V.kaVorschlaege;
-  const ers = v.ergaenzungen.filter((e) => e.an), neu = v.neu.filter((n) => n.an);
+  const ers = ersIn || v.ergaenzungen.filter((e) => e.an), neu = neuIn || v.neu.filter((n) => n.an);
   if (!ers.length && !neu.length) { toast("Nichts angehakt"); return; }
   V.kaStatus = "Word-Datei wird vorbereitet …"; sheetKontaktAbgleich();
   const eintr = (await Dropbox.rpc("files/list_folder", { path: appPath("") })).entries;
@@ -1248,8 +1248,8 @@ Antworte nur mit JSON: [{"i":0,"nach":123,"zeilen":[{"text":"Tel: …","vorlage"
   try { res = await Dropbox.uploadUpdate(datei.path_lower, neuBlob, datei.rev); }
   catch (e) { if (e.status === 409) throw new Error("Die Word-Datei wurde gerade woanders geändert – bitte nochmal versuchen"); throw e; }
   // Adressbuch der App direkt mitziehen
-  for (const e of ers) { const k = kontakt(e.id); if (!k) continue; upsert(S.kontakte, { ...k, tel: [...(k.tel || []), ...(e.tel || []).map((nr) => ({ nr, name: "" }))], email: [...(k.email || []), ...(e.email || [])] }); }
-  for (const n of neu) upsert(S.kontakte, { id: newId("k"), quelle: "word", gewerk: n.gewerk, gruppe: n.gruppe === "Techniker" ? "Techniker" : "Firma", firma: n.firma, person: n.person || "", adresse: "", tel: (n.tel || []).map((nr) => ({ nr, name: "" })), email: n.email || [], pec: [], notiz: "" });
+  if (mitziehen) for (const e of ers) { const k = kontakt(e.id); if (!k) continue; upsert(S.kontakte, { ...k, tel: [...(k.tel || []), ...(e.tel || []).map((nr) => ({ nr, name: "" }))], email: [...(k.email || []), ...(e.email || [])] }); }
+  if (mitziehen) for (const n of neu) upsert(S.kontakte, { id: newId("k"), quelle: "word", gewerk: n.gewerk, gruppe: n.gruppe === "Techniker" ? "Techniker" : "Firma", firma: n.firma, person: n.person || "", adresse: "", tel: (n.tel || []).map((nr) => ({ nr, name: "" })), email: n.email || [], pec: [], notiz: "" });
   upsert(S.einst, { ...einst(), id: "allgemein", wordRev: res.rev, wordName: res.name, wordStand: res.server_modified });
   V.kaVorschlaege = null; V.kaStatus = ""; closeSheet(); changed();
   toast(`In die Word-Liste geschrieben: ${ers.length} Ergänzungen, ${neu.length} neue Firmen`);
@@ -1435,9 +1435,29 @@ document.addEventListener("submit", (ev) => {
   if (f.id === "kontakt-form") {
     const split = (s) => s.split(",").map((x) => x.trim()).filter(Boolean);
     const tel = split(v("k-tel")).map((t) => { const m = t.match(/^(.*?)\s*\(([^)]*)\)\s*$/); return m ? { nr: m[1], name: m[2] } : { nr: t, name: "" }; });
-    const old = kontakt(f.dataset.id) || {};
-    upsert(S.kontakte, { ...old, id: f.dataset.id, firma: v("k-firma"), person: v("k-person"), gewerk: v("k-gewerk"), gruppe: v("k-gruppe"), adresse: v("k-adresse"), tel, email: split(v("k-email")), pec: split(v("k-pec")), notiz: v("k-notiz") });
+    const alt = kontakt(f.dataset.id);
+    const old = alt || {};
+    const rec = { ...old, id: f.dataset.id, firma: v("k-firma"), person: v("k-person"), gewerk: v("k-gewerk"), gruppe: v("k-gruppe"), adresse: v("k-adresse"), tel, email: split(v("k-email")), pec: split(v("k-pec")), notiz: v("k-notiz") };
+    if (einst().wordName || V.wordDatei) rec.quelle = "word";
+    upsert(S.kontakte, rec);
     closeSheet(); changed(); toast("Kontakt gespeichert");
+    // In die Word-Liste übernehmen: neuer Kontakt bzw. neu hinzugekommene Nummern/Mails
+    if ((einst().wordName || V.wordDatei) && (einst().apiKey || "").trim()) {
+      const norm = (x) => String(x).replace(/[^\d+]/g, "");
+      let ers = [], neu = [];
+      if (!alt) neu = [{ gewerk: rec.gewerk, gruppe: rec.gruppe, firma: rec.firma, person: rec.person, tel: tel.map((t) => t.nr + (t.name ? " (" + t.name + ")" : "")), email: [...rec.email, ...rec.pec] }];
+      else {
+        const neueTel = tel.filter((t) => !(alt.tel || []).some((a) => norm(a.nr) === norm(t.nr))).map((t) => t.nr);
+        const neueMail = [...rec.email, ...rec.pec].filter((m) => ![...(alt.email || []), ...(alt.pec || [])].map((x) => x.toLowerCase()).includes(m.toLowerCase()));
+        if (neueTel.length || neueMail.length) ers = [{ id: rec.id, tel: neueTel, email: neueMail }];
+        const sonst = ["firma", "person", "adresse", "gewerk"].some((k) => (alt[k] || "") !== (rec[k] || ""));
+        if (sonst) toast("Hinweis: Namens-/Adressänderungen bitte auch in der Word-Datei machen");
+      }
+      if (ers.length || neu.length) {
+        V.kaVorschlaege = { ergaenzungen: [], neu: [] };
+        inWordSchreiben(ers, neu, { mitziehen: false }).catch((e) => { V.kaStatus = ""; closeSheet(); toast("Word-Datei: " + (e.message || e)); });
+      }
+    }
   }
   if (f.id === "settings-form") {
     S.meinName = v("s-meinname");
