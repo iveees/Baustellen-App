@@ -97,10 +97,13 @@ function scheduleSync(ms = 1500) { clearTimeout(syncTimer); syncTimer = setTimeo
 async function sync() {
   if (!S.auth || !S.appOrdner || !V.online) { renderSync(); return; }
   if (V.syncing) { syncAgain = true; return; }
-  V.syncing = true; renderSync();
+  V.syncing = true; S.syncFehler = ""; renderSync();
   try {
-    await syncDoc(appPath("/Adressbuch.json"), () => S.kontakte, (v) => (S.kontakte = v), window.START_KONTAKTE || []);
+    await syncDoc(appPath("/Einstellungen.json"), () => S.einst, (v) => (S.einst = v));
     await syncDoc(appPath("/Baustellen.json"), () => S.baustellen, (v) => (S.baustellen = v));
+    await syncDoc(appPath("/Adressbuch.json"), () => S.kontakte, (v) => (S.kontakte = v), window.START_KONTAKTE || []);
+    await wordListeAbgleichen(V.wordErzwingen); V.wordErzwingen = false;
+    await syncDoc(appPath("/Adressbuch.json"), () => S.kontakte, (v) => (S.kontakte = v));
     await syncDoc(appPath("/Einstellungen.json"), () => S.einst, (v) => (S.einst = v));
     for (const b of live(S.baustellen)) {
       if (!b.ordner) continue;
@@ -109,7 +112,7 @@ async function sync() {
     }
     for (const b of live(S.baustellen)) if (b.ordner) { try { await dateienAbgleichen(b); } catch (e) { console.warn("Abgleich", e); } }
     await uploadQueue();
-    S.letzterSync = Date.now(); S.syncFehler = S.queue.length ? S.queue.length + " Datei(en) noch nicht hochgeladen – wird erneut versucht" + (V.uploadFehler ? " (" + V.uploadFehler + ")" : "") : "";
+    S.letzterSync = Date.now(); if (/Word-Liste/.test(S.syncFehler || "")) { /* Hinweis stehen lassen */ } else S.syncFehler = S.queue.length ? S.queue.length + " Datei(en) noch nicht hochgeladen – wird erneut versucht" + (V.uploadFehler ? " (" + V.uploadFehler + ")" : "") : "";
   } catch (e) {
     console.error(e);
     S.syncFehler = e.status === 401 ? "Dropbox-Anmeldung abgelaufen – bitte neu anmelden" : e.notFound ? "Ordner in Dropbox nicht gefunden: " + (e.summary || "") : "Synchronisieren fehlgeschlagen (" + (e.message || e) + ")";
@@ -184,7 +187,7 @@ function syncHtml() {
   let cls = "", txt;
   if (!S.auth) { cls = "err"; txt = "Nicht mit Dropbox verbunden"; }
   else if (!V.online) { cls = "warn"; txt = "Offline – wird später hochgeladen" + (S.queue.length ? ` (${S.queue.length} Dateien)` : ""); }
-  else if (V.syncing) { cls = "warn"; txt = "Synchronisiere …"; }
+  else if (V.syncing) { cls = "warn"; txt = V.wordStatus || "Synchronisiere …"; }
   else if (S.syncFehler) { cls = "err"; txt = S.syncFehler; }
   else txt = S.letzterSync ? "Mit Dropbox abgeglichen " + new Date(S.letzterSync).toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" }) : "Noch nicht abgeglichen";
   return `<span class="dot ${cls}"></span><span style="flex:1">${esc(txt)}</span><button class="btn" style="min-height:36px;padding:4px 10px" data-act="sync">↻</button>`;
@@ -279,13 +282,19 @@ function contactCard(k, bid) {
   const mails = (k.email || []).map((m) => `<a data-k="@" href="#" data-act="mail-einzel" data-to="${esc(m)}">${esc(m)}</a>`).join("");
   const pecs = (k.pec || []).map((m) => `<a data-k="P" href="#" data-act="mail-einzel" data-to="${esc(m)}">${esc(m)} (PEC)</a>`).join("");
   return `<div class="contact"><div class="head"><div class="grow"><div class="firma">${esc(k.firma)}</div>${k.person ? `<div class="sub">${esc(k.person)}</div>` : ""}</div>
-    ${bid ? `<button class="iconbtn" data-act="beteiligt-weg" data-b="${esc(bid)}" data-id="${esc(k.id)}" aria-label="Entfernen">×</button>` : `<button class="iconbtn" data-act="kontakt-edit" data-id="${esc(k.id)}" aria-label="Bearbeiten">✎</button>`}</div>
+    ${bid ? `<button class="iconbtn" data-act="beteiligt-weg" data-b="${esc(bid)}" data-id="${esc(k.id)}" aria-label="Entfernen">×</button>` : `<button class="iconbtn" data-act="kontakt-edit" data-id="${esc(k.id)}" aria-label="Bearbeiten">✎</button>`.replace(/^.*$/s, (x) => (k.quelle === "word" ? "" : x))}</div>
     <div class="links">${tels}${mails}${pecs}</div>${k.notiz ? `<div class="hint">${esc(k.notiz)}</div>` : ""}</div>`;
 }
 function viewAdressbuch() {
   const q = V.search.trim().toLowerCase();
   const all = sortKontakte(live(S.kontakte)).filter((k) => !q || [k.firma, k.person, k.gewerk, k.adresse, ...(k.email || [])].join(" ").toLowerCase().includes(q));
-  return `<div class="top"><div class="grow"><h1>Adressbuch</h1><div class="sub">${live(S.kontakte).length} Kontakte</div></div><button class="btn primary" data-act="kontakt-neu">+ Neu</button></div>
+  const w = einst().wordName; const wd = V.wordDatei;
+  const wordKarte = wd || w ? `<div class="card"><div>${w ? `Quelle: Word-Liste <b>${esc(w)}</b>` : `Word-Liste gefunden: <b>${esc(wd.name)}</b>`}</div>
+      <div class="hint">${w ? `Eingelesen: Stand ${einst().wordStand ? fmtDT(einst().wordStand) : "?"}. ` : ""}${wd?.neu ? `<b style="color:var(--open)">In Dropbox liegt eine neuere Version (${fmtDT(wd.stand)}).</b> ` : w ? "Aktuell. " : ""}Einlesen kostet ein paar Cent (Claude).</div>
+      <div class="row"><button class="btn ${wd?.neu ? "primary" : ""}" data-act="word-neu">Word-Liste einlesen</button></div><div class="hint">Kontakte bitte in der Word-Datei ändern, nicht hier.</div></div>`
+    : `<div class="hint">Tipp: Lege eure Word-Liste der Firmen in den gemeinsamen App-Ordner. Dann kannst du sie hier mit einem Knopf einlesen.</div>`;
+  return `<div class="top"><div class="grow"><h1>Adressbuch</h1><div class="sub">${live(S.kontakte).length} Kontakte</div></div>${w ? "" : `<button class="btn primary" data-act="kontakt-neu">+ Neu</button>`}</div>
+    ${wordKarte}
     <input type="search" id="search" placeholder="Suchen: Firma, Name, Gewerk …" value="${esc(V.search)}" autocomplete="off">
     ${[...groupBy(all, "gewerk")].map(([g, ks]) => `<section class="group"><h3>${esc(g)} (${ks.length})</h3>${ks.map((k) => contactCard(k)).join("")}</section>`).join("") || `<div class="empty">Nichts gefunden.</div>`}`;
 }
@@ -1003,6 +1012,89 @@ async function pdfProtokoll(b, prot, punkte) {
   return doc.output("datauristring").split(",")[1];
 }
 
+// ---------- Word-Liste der Beteiligten (Quelle des Adressbuchs) ----------
+// Liegt eine .docx im gemeinsamen App-Ordner, ist sie die Quelle: Bei jeder Änderung
+// liest die App sie neu ein (mit Claude) und gleicht das Adressbuch ab.
+async function wordText(blob) {
+  const zip = await JSZip.loadAsync(blob);
+  const xml = await zip.file("word/document.xml").async("string");
+  const doc = new DOMParser().parseFromString(xml, "application/xml");
+  const W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+  const zeilen = [];
+  for (const p of doc.getElementsByTagNameNS(W, "p")) {
+    let t = "";
+    for (const n of p.getElementsByTagNameNS(W, "*")) {
+      if (n.localName === "t") t += n.textContent;
+      else if (n.localName === "tab") t += " ";
+      else if (n.localName === "br") t += "\n";
+    }
+    if (t.trim()) zeilen.push(t.trim());
+  }
+  return zeilen.join("\n");
+}
+const normFirma = (s) => String(s || "").toLowerCase().normalize("NFKD").replace(/[̀-ͯ]/g, "").replace(/\b(gmbh|kg|ohg|snc|sas|srl|srls|ag|des|di|d\.|&|co\.?|und)\b/g, "").replace(/[^a-z0-9]/g, "");
+async function wordListeAbgleichen(erzwingen = false) {
+  const e0 = einst();
+  let eintraege;
+  try { eintraege = (await Dropbox.rpc("files/list_folder", { path: appPath("") })).entries; } catch { return; }
+  const datei = eintraege.filter((e) => e[".tag"] === "file" && /\.docx$/i.test(e.name) && !e.name.startsWith("~$")).sort((a, b) => (b.server_modified > a.server_modified ? 1 : -1))[0];
+  V.wordDatei = datei ? { name: datei.name, stand: datei.server_modified, neu: e0.wordRev !== datei.rev } : null;
+  if (!datei || !erzwingen) return;   // eingelesen wird nur auf Knopfdruck
+  if (!(e0.apiKey || "").trim()) { S.syncFehler = "Word-Liste gefunden – zum Einlesen bitte API-Schlüssel eintragen"; return; }
+  V.wordStatus = "Lese Word-Liste „" + datei.name + "“ ein … (dauert ca. 1 Minute)"; renderSync();
+  try {
+    const blob = await Dropbox.download(datei.path_lower);
+    const text = (await wordText(blob)).slice(0, 60000);
+    const prompt = `Hier ist eine Firmen- und Technikerliste eines Architekturbüros in Südtirol (Text aus einer Word-Datei). Zwischenüberschriften wie "Elektriker", "Hydrauliker", "Statiker" geben das Gewerk bzw. die Rolle der folgenden Einträge an.
+
+Mache daraus eine Kontaktliste. Für jede Firma bzw. Person genau ein Eintrag:
+- gewerk: das Gewerk/die Rolle aus der Zwischenüberschrift (kurz, z. B. "Elektriker", "Fliesen", "Baufirma", "Statiker", "Fenster", "Zimmerer")
+- gruppe: "Techniker" für Planer, Techniker, Statiker, Geologen, Geometer, Sicherheitskoordinatoren, Architekten, Akustiker, Klimahaus-Techniker; sonst "Firma"
+- firma: Firmen- bzw. Personenname wie in der Liste
+- person: Ansprechpartner, falls genannt (z. B. Name in Klammern hinter einer Telefonnummer), sonst ""
+- adresse: Straße, PLZ, Ort in einer Zeile, sonst ""
+- tel: Liste von {"nr": "...", "name": "..."} (name = Person zur Nummer, sonst "")
+- email: normale E-Mail-Adressen; pec: PEC-Adressen (zertifizierte Mail, oft "pec" oder "legalmail" im Namen oder als PEC bezeichnet)
+- notiz: kurze sonstige Hinweise aus der Liste (z. B. "Empfehlung von …", "neu seit …"), sonst ""
+Lass Steuernummern, MwSt.-Nummern, Geburtsdaten, Handelskammer-Daten und Ähnliches weg. Erfinde nichts.
+
+Antworte nur mit einem JSON-Array.
+
+LISTE:
+${text}`;
+    const arr = jsonAus(await claude(prompt, 32000));
+    if (!Array.isArray(arr) || arr.length < 3) throw new Error("Liste nicht erkannt");
+    // Abgleich: bestehende Kontakte am Namen bzw. an der Mailadresse wiedererkennen (IDs bleiben)
+    const alt = live(S.kontakte);
+    const verwendet = new Set(S.baustellen.flatMap((b) => b.beteiligte || []));
+    const gesehen = new Set();
+    let neu = 0, geaendert = 0;
+    for (const r of arr) {
+      if (!r || !r.firma) continue;
+      const mails = [...(r.email || []), ...(r.pec || [])].map((m) => String(m).toLowerCase());
+      const k = alt.find((x) => !gesehen.has(x.id) && normFirma(x.firma) === normFirma(r.firma) && (x.gewerk || "") === (r.gewerk || x.gewerk))
+        || alt.find((x) => !gesehen.has(x.id) && normFirma(x.firma) === normFirma(r.firma))
+        || alt.find((x) => !gesehen.has(x.id) && mails.length && [...(x.email || []), ...(x.pec || [])].some((m) => mails.includes(String(m).toLowerCase())));
+      const rec = { id: k ? k.id : newId("k"), quelle: "word", gewerk: String(r.gewerk || "Sonstige"), gruppe: r.gruppe === "Techniker" ? "Techniker" : "Firma", firma: String(r.firma), person: String(r.person || ""),
+        adresse: String(r.adresse || ""), tel: (r.tel || []).map((t) => (typeof t === "string" ? { nr: t, name: "" } : { nr: String(t.nr || ""), name: String(t.name || "") })).filter((t) => t.nr),
+        email: (r.email || []).map(String), pec: (r.pec || []).map(String), notiz: String(r.notiz || "") };
+      gesehen.add(rec.id);
+      if (!k) { neu++; upsert(S.kontakte, rec); }
+      else { const vorher = JSON.stringify({ ...k, geaendert: 0 }); const nachher = JSON.stringify({ ...k, ...rec, geaendert: 0 }); if (vorher !== nachher) { geaendert++; upsert(S.kontakte, { ...k, ...rec }); } }
+    }
+    let entfernt = 0;
+    for (const k of alt) if (!gesehen.has(k.id)) {
+      if (verwendet.has(k.id)) { if (!/nicht mehr in der Word-Liste/.test(k.notiz || "")) upsert(S.kontakte, { ...k, notiz: ((k.notiz || "") + " · nicht mehr in der Word-Liste").replace(/^ · /, "") }); }
+      else { upsert(S.kontakte, { ...k, geloescht: true }); entfernt++; }
+    }
+    upsert(S.einst, { ...einst(), id: "allgemein", wordRev: datei.rev, wordName: datei.name, wordStand: datei.server_modified });
+    V.wordDatei.neu = false;
+    toast(`Word-Liste eingelesen: ${neu} neu, ${geaendert} geändert, ${entfernt} entfernt`);
+  } catch (e) {
+    S.syncFehler = "Word-Liste konnte nicht eingelesen werden: " + (e.message || e);
+  } finally { V.wordStatus = ""; }
+}
+
 // ---------- PDF Beteiligtenliste ----------
 const pdfSafe = (s) => String(s ?? "").replace(/[‘’‚]/g, "'").replace(/[“”„]/g, '"').replace(/[–—]/g, "-").replace(/[^\x09\x0A\x0D\x20-\x7E\xA0-\xFF€]/g, "");
 async function pdfBeteiligte(b) {
@@ -1135,6 +1227,7 @@ document.addEventListener("click", async (ev) => {
     case "logout": if (!t.dataset.confirm) { t.dataset.confirm = "1"; t.textContent = "Wirklich abmelden?"; break; } Dropbox.logout(); S.appOrdner = null; persist(); render(); break;
     case "pick-appordner": folderPicker("Gemeinsamen App-Ordner wählen", S.appOrdner?.anzeige || "", (ref) => { S.appOrdner = ref; if (ref.privat) toast("Achtung: Ordner ist nicht geteilt"); persist(); render(); sync(); }); break;
     case "sync": S.abgleich = {}; sync(); break;
+    case "word-neu": V.wordErzwingen = true; sync(); toast("Word-Liste wird neu eingelesen …"); break;
     case "baustelle-neu": sheetBaustelle(null); break;
     case "baustelle-edit": sheetBaustelle(id); break;
     case "tab": V.tab = t.dataset.v; render(); break;

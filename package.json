@@ -17,7 +17,8 @@
     "@capacitor/preferences": "6.0.2",
     "docx": "9.5.1",
     "jspdf": "2.5.1",
-    "jspdf-autotable": "3.8.2"
+    "jspdf-autotable": "3.8.2",
+    "jszip": "3.10.1"
   },
   "devDependencies": {
     "@capacitor/cli": "6.1.2"
