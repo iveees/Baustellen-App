@@ -1,0 +1,17 @@
+{
+  "name": "mail-test-windows",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Test: Mail mit Anhängen an eM Client übergeben",
+  "main": "main.js",
+  "author": "Baustellen-Doku",
+  "scripts": { "start": "electron .", "dist": "electron-builder --win portable --publish never" },
+  "build": {
+    "appId": "it.baustelle.mailtest.win",
+    "productName": "Mail-Test Windows",
+    "files": ["main.js", "index.html", "mapi.ps1"],
+    "win": { "target": "portable" },
+    "portable": { "artifactName": "MailTest-Windows.exe" }
+  },
+  "devDependencies": { "electron": "31.7.7", "electron-builder": "24.13.3" }
+}

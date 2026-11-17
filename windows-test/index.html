@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="de"><head><meta charset="utf-8"><title>Mail-Test Windows</title>
+<style>
+body { font: 15px/1.45 "Segoe UI", sans-serif; margin: 24px; color: #1d2428; background: #eef0ee; }
+h1 { font-size: 22px; margin: 0 0 6px; }
+.card { background: #fff; border: 1px solid #d3d8d6; border-radius: 10px; padding: 14px; margin: 12px 0; }
+button { font: inherit; font-weight: 600; padding: 10px 14px; border-radius: 8px; border: 1px solid #e8a317; background: #e8a317; cursor: pointer; width: 100%; text-align: left; }
+input { font: inherit; width: 100%; padding: 8px; border: 1px solid #d3d8d6; border-radius: 8px; box-sizing: border-box; }
+.hint { color: #5d686e; font-size: 13px; }
+#log { white-space: pre-wrap; font-family: Consolas, monospace; font-size: 12px; background: #fff; border: 1px solid #d3d8d6; border-radius: 8px; padding: 10px; min-height: 60px; }
+</style></head>
+<body>
+<h1>Mail-Test für die Baustellen-App (Windows)</h1>
+<div class="hint" id="em">eM Client: …</div>
+<div class="card">
+  <label>Empfänger (zum Test am besten deine eigene Adresse)<br><input id="an" placeholder="name@beispiel.it"></label>
+  <div class="hint">Jeder Knopf soll in eM Client eine fertige Mail öffnen. Bitte prüfen: Empfänger, Betreff, Text (mit Umlauten), Foto und PDF. Nicht senden.</div>
+</div>
+<div class="card"><button data-v="cli-mehrere">1 · eM Client direkt, Foto + PDF</button></div>
+<div class="card"><button data-v="cli-eine">2 · eM Client direkt, nur PDF</button></div>
+<div class="card"><button data-v="mapi">3 · Über Windows-Standard-Mailprogramm (MAPI), Foto + PDF</button><div class="hint">Funktioniert nur, wenn eM Client als Standard-Mailprogramm eingestellt ist.</div></div>
+<div class="card"><button data-v="eml">4 · Fertigen Mail-Entwurf (.eml) in eM Client öffnen</button></div>
+<div class="card"><button data-v="ordner" style="background:#fff;border-color:#d3d8d6">Ordner mit den Testdateien öffnen</button></div>
+<div id="log">Bereit.</div>
+<script>
+const { ipcRenderer } = require("electron");
+const log = (t) => { document.getElementById("log").textContent = new Date().toLocaleTimeString() + "  " + t + "\n" + document.getElementById("log").textContent; };
+ipcRenderer.invoke("info").then((i) => (document.getElementById("em").textContent = "eM Client: " + i.em));
+document.querySelectorAll("button").forEach((b) => b.onclick = async () => {
+  const an = document.getElementById("an").value.trim() || "test@beispiel.it";
+  try { log(b.textContent.trim() + " → " + await ipcRenderer.invoke("test", { variante: b.dataset.v, an })); }
+  catch (e) { log(b.textContent.trim() + " → FEHLER: " + e.message); }
+});
+</script>
+</body></html>
