@@ -970,6 +970,7 @@ async function protokollAnsehen(bid, pid) {
 async function protokollNeuErstellen(bid, pid) {
   const b = baustelle(bid);
   const prot = { ...(S.protokolle[bid] || []).find((p) => p.id === pid) };
+  if (S.meinName) prot.verfasser = S.meinName;   // geänderten Namen übernehmen
   const punkte = prot.punkte.map((id) => (S.eintraege[bid] || []).find((e) => e.id === id)).filter((e) => e && !e.geloescht);
   // neue Punkte seit dem Erstellen dieses Protokolls ebenfalls aufnehmen
   let lauf = punkte.filter((e) => e.protokollNr === prot.nr).length;
