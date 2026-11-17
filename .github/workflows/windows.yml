@@ -1,0 +1,41 @@
+name: PC-Version bauen
+
+on:
+  push:
+    branches: [main]
+    paths: ["www/**", "desktop/**", ".github/workflows/windows.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Oberfläche übernehmen (gleich wie Handy-App)
+        shell: bash
+        run: rm -rf desktop/www && cp -r www desktop/www
+      - name: Abhängigkeiten
+        working-directory: desktop
+        run: npm install --no-audit --no-fund
+      - name: Version setzen
+        working-directory: desktop
+        shell: bash
+        run: npm version "0.1.${{ github.run_number }}" --no-git-tag-version
+      - name: Installer bauen
+        working-directory: desktop
+        run: npx electron-builder --win nsis --publish never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+      - name: Als Download bereitstellen (Release "windows")
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release delete windows --yes --cleanup-tag || true
+          gh release create windows desktop/dist/Baustellen-Doku-Setup.exe --title "Baustellen-Doku für Windows (Build ${{ github.run_number }})" --notes "Installer herunterladen und starten. Updates einfach drüber installieren." --target ${{ github.sha }}

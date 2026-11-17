@@ -1,0 +1,18 @@
+{
+  "name": "baustellen-doku-pc",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Baustellen-Doku für Windows",
+  "main": "main.js",
+  "author": "Baustellen-Doku",
+  "scripts": { "start": "electron .", "dist": "electron-builder --win nsis --publish never" },
+  "build": {
+    "appId": "it.baustelle.doku.pc",
+    "productName": "Baustellen-Doku",
+    "files": ["main.js", "preload.js", "shim.js", "mapi.ps1", "www/**/*"],
+    "protocols": [{ "name": "Baustellen-Doku Anmeldung", "schemes": ["baustellendoku"] }],
+    "win": { "target": "nsis" },
+    "nsis": { "oneClick": true, "perMachine": false, "artifactName": "Baustellen-Doku-Setup.exe", "shortcutName": "Baustellen-Doku" }
+  },
+  "devDependencies": { "electron": "31.7.7", "electron-builder": "24.13.3" }
+}

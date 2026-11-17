@@ -13,6 +13,12 @@ const Network = registerPlugin("Network");
 const DiktatP = registerPlugin("Diktat");
 const Mail = registerPlugin("Mail");
 const DATA = "DATA";
+const PC = !!window.IS_DESKTOP;   // Windows-Version (gleiche Oberfläche, andere Hülle)
+// Handy: Kamera; PC: Fotos aus Dateien auswählen (mehrere)
+async function fotoAufnehmen() {
+  if (PC) return (await Camera.pickImages({ quality: 80, width: 1800, limit: 20 })).photos.map((p) => p.path);
+  return [(await Camera.getPhoto({ quality: 80, width: 1800, resultType: "uri", source: "CAMERA", correctOrientation: true, saveToGallery: false })).path];
+}
 
 // ---------- Zustand ----------
 const S = {
@@ -291,7 +297,7 @@ function viewAdressbuch() {
   const w = einst().wordName; const wd = V.wordDatei;
   const wordKarte = wd || w ? `<div class="card"><div>${w ? `Quelle: Word-Liste <b>${esc(w)}</b>` : `Word-Liste gefunden: <b>${esc(wd.name)}</b>`}</div>
       <div class="hint">${w ? `Eingelesen: Stand ${einst().wordStand ? fmtDT(einst().wordStand) : "?"}. ` : ""}${wd?.neu ? `<b style="color:var(--open)">In Dropbox liegt eine neuere Version (${fmtDT(wd.stand)}).</b> ` : w ? "Aktuell. " : ""}Einlesen kostet ein paar Cent (Claude).</div>
-      <div class="row"><button class="btn ${wd?.neu ? "primary" : ""}" data-act="word-neu">Word-Liste einlesen</button><button class="btn" data-act="kontakt-abgleich">Mit Handykontakten abgleichen</button></div><div class="hint">Neue Kontakte und neue Nummern/Mails aus der App werden automatisch in die Word-Datei geschrieben. Andere Änderungen (Name, Adresse) bitte direkt in Word.</div></div>`
+      <div class="row"><button class="btn ${wd?.neu ? "primary" : ""}" data-act="word-neu">Word-Liste einlesen</button>${PC ? "" : `<button class="btn" data-act="kontakt-abgleich">Mit Handykontakten abgleichen</button>`}</div><div class="hint">Neue Kontakte und neue Nummern/Mails aus der App werden automatisch in die Word-Datei geschrieben. Andere Änderungen (Name, Adresse) bitte direkt in Word.</div></div>`
     : `<div class="hint">Tipp: Lege eure Word-Liste der Firmen in den gemeinsamen App-Ordner. Dann kannst du sie hier mit einem Knopf einlesen.</div>`;
   return `<div class="top"><div class="grow"><h1>Adressbuch</h1><div class="sub">${live(S.kontakte).length} Kontakte</div></div><button class="btn primary" data-act="kontakt-neu">+ Neu</button></div>
     ${wordKarte}
@@ -487,10 +493,10 @@ function sheetEintrag(bid, eid) {
     <div class="sub">${esc(b.name)} · ${fmtDT(E.ts)}</div>
     <div class="box"><h3>Fotos</h3>
       <div class="photos">${E.fotos.map((f, i) => `<div class="photo">${fotoImg(bid, f)}<button data-x="foto-weg" data-i="${i}" aria-label="Foto entfernen">×</button></div>`).join("")}</div>
-      <div class="row"><button class="btn primary" data-x="kamera">Foto aufnehmen</button><button class="btn" data-x="galerie">Aus Galerie</button></div>
+      <div class="row"><button class="btn primary" data-x="kamera">${PC ? "Fotos hinzufügen" : "Foto aufnehmen"}</button>${PC ? "" : `<button class="btn" data-x="galerie">Aus Galerie</button>`}</div>
     </div>
     <div class="box"><h3>Beschreibung</h3>
-      <button class="mic ${Diktat.aktiv ? "on" : ""}" data-x="mic"><span class="dot"></span>${Diktat.aktiv ? "Aufnahme läuft · tippen = fertig" : "Sprechen"}</button>
+      <button class="mic ${Diktat.aktiv ? "on" : ""}" data-x="mic"><span class="dot"></span>${Diktat.aktiv ? "Aufnahme läuft · tippen = fertig" : PC ? "Diktieren: ins Textfeld klicken, dann Windows-Taste + H" : "Sprechen"}</button>
       <div class="partial" id="e-partial"></div>
       <textarea id="e-text" placeholder="z. B. Im Bad OG ist die Silikonfuge an der Dusche gerissen.">${esc(E.text)}</textarea>
       <button class="btn" data-x="aufbereiten">${einst().apiKey ? "✦ Aufbereiten: Titel, Zuständig, Frist, Mail" : "Zuständig aus dem Text erkennen"}</button><div class="hint" id="e-ki"></div>
@@ -545,7 +551,7 @@ function sheetEintrag(bid, eid) {
     const x = t.dataset.x;
     if (x === "kamera") {
       read();
-      try { const p = await Camera.getPhoto({ quality: 80, width: 1800, resultType: "uri", source: "CAMERA", correctOrientation: true, saveToGallery: false }); await addFoto(p.path); draw(); }
+      try { for (const pfad of await fotoAufnehmen()) await addFoto(pfad); draw(); }
       catch (e) { if (!/cancel/i.test(e.message || "")) toast("Kamera: " + (e.message || e)); }
       return;
     }
@@ -632,6 +638,7 @@ const Diktat = {
   },
   async start(ziel) {
     this.ziel = ziel;
+    if (PC) { const ta = document.getElementById("e-text") || document.getElementById("r-text"); ta?.focus(); toast("Jetzt Windows-Taste + H drücken und sprechen"); return; }
     if (!NATIVE) { toast("Sprechen geht nur in der App"); return; }
     try { await DiktatP.start({ language: einst().diktat || "de-DE" }); }
     catch (e) { toast(e.message || String(e)); }
@@ -798,9 +805,9 @@ function sheetBegehung(bid) {
     $panel.innerHTML = `<div class="bar"><h2>Punkt ${n}</h2><button class="btn" data-x="beenden">Beenden</button><button class="iconbtn" data-x="close" aria-label="Pause">⏸</button></div>
       <div class="box">
         <div class="photos">${p.fotos.map((f, i) => `<div class="photo">${fotoImg(bid, f)}<button data-x="foto-weg" data-i="${i}" aria-label="Foto entfernen">×</button></div>`).join("")}</div>
-        <div class="row"><button class="btn primary" style="flex:2" data-x="kamera">📷 Foto</button><button class="btn" style="flex:1" data-x="galerie">Galerie</button></div>
+        <div class="row"><button class="btn primary" style="flex:2" data-x="kamera">${PC ? "Fotos hinzufügen" : "📷 Foto"}</button>${PC ? "" : `<button class="btn" style="flex:1" data-x="galerie">Galerie</button>`}</div>
       </div>
-      <button class="mic ${Diktat.aktiv ? "on" : ""}" data-x="mic"><span class="dot"></span>${Diktat.aktiv ? "Aufnahme läuft · tippen = fertig" : "Sprechen"}</button>
+      <button class="mic ${Diktat.aktiv ? "on" : ""}" data-x="mic"><span class="dot"></span>${Diktat.aktiv ? "Aufnahme läuft · tippen = fertig" : PC ? "Diktieren: ins Textfeld klicken, dann Windows-Taste + H" : "Sprechen"}</button>
       <div class="partial" id="r-partial"></div>
       <textarea id="r-text" placeholder="z. B. Fliesenleger, im Bad OG ist die Silikonfuge gerissen, bis Freitag richten">${esc(p.text)}</textarea>
       <button class="btn primary big" data-x="weiter">Nächster Punkt ›</button>
@@ -828,7 +835,7 @@ function sheetBegehung(bid) {
     }
     if (x === "kamera") {
       leseText();
-      try { const ph = await Camera.getPhoto({ quality: 80, width: 1800, resultType: "uri", source: "CAMERA", correctOrientation: true, saveToGallery: false }); await addFoto(ph.path); drawAufnahme(); }
+      try { for (const pfad of await fotoAufnehmen()) await addFoto(pfad); drawAufnahme(); }
       catch (e) { if (!/cancel/i.test(e.message || "")) toast("Kamera: " + (e.message || e)); }
       return;
     }

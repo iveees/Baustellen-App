@@ -1,1 +1,5 @@
 node_modules/
+desktop/www/
+desktop/dist/
+windows-test/node_modules/
+windows-test/dist/
