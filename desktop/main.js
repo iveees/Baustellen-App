@@ -58,6 +58,15 @@ ipcMain.handle("fotos:waehlen", async (_e, { mehrere }) => {
 // ---------- Links, Dateien öffnen ----------
 ipcMain.handle("browser:open", (_e, { url: u }) => shell.openExternal(u));
 ipcMain.handle("datei:oeffnen", async (_e, { path: p }) => { const fehler = await shell.openPath(ausUri(p)); if (fehler) throw new Error(fehler); });
+// Lokaler Dropbox-Ordner (aus der Dropbox-Desktop-App) + Pfad aus der Dropbox-API -> Datei auf diesem PC
+ipcMain.handle("dropbox:lokal", async (_e, { pfad }) => {
+  const kandidaten = [process.env.LOCALAPPDATA, process.env.APPDATA].filter(Boolean).map((d) => path.join(d, "Dropbox", "info.json"));
+  const wurzeln = [];
+  for (const k of kandidaten) { try { const j = JSON.parse(await fsp.readFile(k, "utf8")); for (const v of Object.values(j)) if (v?.path) wurzeln.push(v.path); } catch {} }
+  wurzeln.push(path.join(app.getPath("home"), "Dropbox"));
+  for (const w of wurzeln) { const ziel = path.join(w, ...String(pfad).split("/").filter(Boolean)); try { await fsp.access(ziel); return ziel; } catch {} }
+  return null;
+});
 ipcMain.handle("app:info", () => ({ version: app.getVersion() }));
 
 // ---------- Mail: fertiger Entwurf (.eml) in eM Client, sonst Windows-MAPI ----------

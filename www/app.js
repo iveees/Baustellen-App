@@ -53,7 +53,8 @@ function groupBy(arr, key) { const m = new Map(); for (const x of arr) { const k
 function route() { const h = location.hash.slice(1); if (h.startsWith("b-")) return { name: "baustelle", id: h.slice(2) }; if (h === "adressbuch" || h === "einstellungen") return { name: h }; return { name: "start" }; }
 const kontakt = (id) => S.kontakte.find((k) => k.id === id && !k.geloescht);
 const baustelle = (id) => S.baustellen.find((b) => b.id === id && !b.geloescht);
-const eintraegeVon = (bid) => live(S.eintraege[bid] || []).sort((a, b) => (b.ts || 0) - (a.ts || 0));
+const reihe = (e) => e.pos ?? e.ts ?? 0;   // eigene Reihenfolge (verschoben) vor Erstellzeit
+const eintraegeVon = (bid) => live(S.eintraege[bid] || []).sort((a, b) => reihe(b) - reihe(a));
 const beteiligte = (b) => sortKontakte((b?.beteiligte || []).map(kontakt).filter(Boolean));
 function upsert(arr, rec) { rec.geaendert = Date.now(); const i = arr.findIndex((x) => x.id === rec.id); if (i >= 0) arr[i] = rec; else arr.push(rec); }
 const fileSrc = (rel) => Capacitor.convertFileSrc(V.dataUri + "/" + rel);
@@ -138,7 +139,10 @@ async function uploadQueue() {
     if (!b?.ordner) { rest.push(q); continue; }
     const blob = await lokaleDatei(q.lokal);
     if (!blob) { console.warn("Datei fehlt auf dem Handy", q); continue; }   // nur dann verwerfen
-    try { await Dropbox.upload(bPath(b, UNTERORDNER[q.art] + q.name), blob); }
+    try {
+      const res = await Dropbox.upload(bPath(b, UNTERORDNER[q.art] + q.name), blob);
+      if (q.word && res?.rev) { const p = (S.protokolle[q.bid] || []).find((x) => x.id === q.word); if (p) { p.wordRev = res.rev; upsert(S.protokolle[q.bid], p); } }
+    }
     catch (e) { console.warn("Upload später erneut", q, e); V.uploadFehler = (e.summary || e.message || String(e)).slice(0, 80); rest.push(q); }  // Netz/Server: behalten
   }
   S.queue = rest;
@@ -153,7 +157,7 @@ async function dateienAbgleichen(b) {
   for (const e of live(S.eintraege[b.id] || [])) for (const f of e.fotos || [])
     if (S.lokal[f] && !fotos.has(f.toLowerCase()) && !inQueue.has(f)) S.queue.push({ art: "foto", bid: b.id, name: f, lokal: S.lokal[f] });
   for (const p of live(S.protokolle[b.id] || []))
-    if (p.datei && S.lokal[p.datei] && !prots.has(p.datei.toLowerCase()) && !inQueue.has(p.datei)) S.queue.push({ art: "protokoll", bid: b.id, name: p.datei, lokal: S.lokal[p.datei] });
+    for (const d of [p.datei, p.wordDatei]) if (d && S.lokal[d] && !prots.has(d.toLowerCase()) && !inQueue.has(d)) S.queue.push({ art: "protokoll", bid: b.id, name: d, lokal: S.lokal[d], word: d === p.wordDatei ? p.id : undefined });
   S.abgleich[b.id] = Date.now();
 }
 
@@ -246,22 +250,23 @@ function viewBaustelle(id) {
   const b = baustelle(id);
   if (!b) return `<div class="empty">Baustelle nicht gefunden. <a href="#start">Zur Übersicht</a></div>`;
   const es = eintraegeVon(id);
-  const shown = V.filter === "offen" ? es.filter((e) => e.status !== "erledigt") : es;
+  let shown = V.filter === "offen" ? es.filter((e) => e.status !== "erledigt") : es;
+  if (S.umgekehrt) shown = shown.slice().reverse();
   const bet = beteiligte(b);
   const prots = protokolleVon(id);
   const rg = S.begehung[id];
   const neuSeitProt = es.filter((e) => !e.protokollNr).length;
   let body;
   if (V.tab === "eintraege") {
-    body = `<div class="chips"><button class="chip" aria-pressed="${V.filter === "offen"}" data-act="filter" data-v="offen">Offen (${es.filter((e) => e.status !== "erledigt").length})</button><button class="chip" aria-pressed="${V.filter === "alle"}" data-act="filter" data-v="alle">Alle (${es.length})</button></div>
-    <div class="stack">${shown.map((e) => entryCard(e)).join("") || `<div class="empty">${V.filter === "offen" ? "Keine offenen Punkte." : "Noch keine Einträge."}</div>`}</div>
-    ${shown.length ? `<div class="hint">Zum schnellen Löschen lange auf einen Punkt drücken.</div>` : ""}`;
+    body = `<div class="chips"><button class="chip" aria-pressed="${V.filter === "offen"}" data-act="filter" data-v="offen">Offen (${es.filter((e) => e.status !== "erledigt").length})</button><button class="chip" aria-pressed="${V.filter === "alle"}" data-act="filter" data-v="alle">Alle (${es.length})</button><button class="chip" aria-pressed="${!!S.umgekehrt}" data-act="umkehren">⇅ Umkehren</button></div>
+    <div class="stack" id="punkte-liste">${shown.map((e) => entryCard(e)).join("") || `<div class="empty">${V.filter === "offen" ? "Keine offenen Punkte." : "Noch keine Einträge."}</div>`}</div>
+    ${shown.length ? `<div class="hint">Reihenfolge ändern: das Kästchen ⠿ rechts festhalten und den Punkt nach oben oder unten ziehen. Zum Löschen lange auf einen Punkt drücken.</div>` : ""}`;
   } else if (V.tab === "protokolle") {
     body = `<button class="btn primary" data-act="protokoll-neu" data-id="${esc(id)}">+ Protokoll erstellen</button>
     <div class="hint">Zum Löschen lange auf ein Protokoll drücken.</div>
     <div class="stack">${prots.map((p) => `<div class="card" data-lp="protokoll" data-b="${esc(id)}" data-id="${esc(p.id)}"><div class="title">Protokoll Nr. ${p.nr} · ${fmtDate(p.datum)}</div>
-      <div class="meta"><span>${p.punkte?.length || 0} ${p.punkte?.length === 1 ? "Punkt" : "Punkte"}</span>${p.verfasser ? `<span>${esc(p.verfasser)}</span>` : ""}<span>${S.queue.some((q) => q.name === p.datei) ? "⏳ wird in Dropbox gespeichert" : "☁ in Dropbox gespeichert"}</span></div>
-      <div class="row"><button class="btn primary" data-act="protokoll-ansehen" data-b="${esc(id)}" data-id="${esc(p.id)}">Ansehen</button><button class="btn" data-act="protokoll-senden" data-b="${esc(id)}" data-id="${esc(p.id)}">Mail vorbereiten</button>${p.nr === prots[0].nr ? `<button class="btn" data-act="protokoll-neu-erstellen" data-b="${esc(id)}" data-id="${esc(p.id)}">Neu erstellen</button>` : ""}</div></div>`).join("") || `<div class="empty">Noch kein Protokoll.</div>`}</div>`;
+      <div class="meta"><span>${p.punkte?.length || 0} ${p.punkte?.length === 1 ? "Punkt" : "Punkte"}</span>${p.verfasser ? `<span>${esc(p.verfasser)}</span>` : ""}<span>${S.queue.some((q) => q.name === p.datei || q.name === p.wordDatei) ? "⏳ wird in Dropbox gespeichert" : "☁ in Dropbox gespeichert"}${p.wordDatei ? " · PDF + Word" : ""}</span></div>
+      <div class="row"><button class="btn primary" data-act="protokoll-ansehen" data-b="${esc(id)}" data-id="${esc(p.id)}">Ansehen</button>${PC && p.wordDatei ? `<button class="btn" data-act="protokoll-word" data-b="${esc(id)}" data-id="${esc(p.id)}">In Word bearbeiten</button>` : ""}<button class="btn" data-act="protokoll-senden" data-b="${esc(id)}" data-id="${esc(p.id)}">Mail vorbereiten</button>${p.nr === prots[0].nr ? `<button class="btn" data-act="protokoll-neu-erstellen" data-b="${esc(id)}" data-id="${esc(p.id)}">Neu erstellen</button>` : ""}</div></div>`).join("") || `<div class="empty">Noch kein Protokoll.</div>`}</div>`;
   } else {
     body = `<div class="row"><button class="btn primary" data-act="beteiligte-waehlen">+ Aus Adressbuch</button><button class="btn" data-act="beteiligte-speichern">Liste in Dropbox speichern (PDF + Word)</button><button class="btn" data-act="mail-alle">Liste an alle (Mail vorbereiten)</button></div>
     ${[...groupBy(bet, "gewerk")].map(([g, ks]) => `<section class="group"><h3>${esc(g)}</h3>${ks.map((k) => contactCard(k, id)).join("")}</section>`).join("") || `<div class="empty">Noch keine Beteiligten. Tippe auf „Aus Adressbuch“.</div>`}`;
@@ -276,8 +281,9 @@ function viewBaustelle(id) {
 
 function entryCard(e) {
   const ks = (e.kontaktIds || []).map(kontakt).filter(Boolean);
-  return `<button class="card" data-act="eintrag-edit" data-lp="eintrag" data-id="${esc(e.id)}" data-b="${esc(e.baustelleId)}">
+  return `<button class="card${e.status !== "erledigt" ? " mitgriff" : ""}" data-act="eintrag-edit" data-lp="eintrag" data-id="${esc(e.id)}" data-b="${esc(e.baustelleId)}">
     <div class="row"><span class="pill ${e.status === "erledigt" ? "erledigt" : "offen"}">${e.status === "erledigt" ? "erledigt" : "offen"}</span><span class="pill art">${esc(e.art || "Notiz")}</span>${e.nr ? `<span class="pill art">Nr. ${esc(e.nr)}</span>` : `<span class="pill art">neu</span>`}${e.mailGesendet ? `<span class="pill art">Mail ✓</span>` : ""}</div>
+    ${e.status !== "erledigt" ? `<span class="griff" data-griff aria-label="Verschieben">⠿</span>` : ""}
     <div class="title">${esc(e.titel || "Ohne Titel")}</div>
     <div class="meta"><span>${fmtDT(e.ts)}</span>${ks.length ? `<span>${esc(ks.map((k) => k.firma).join(", "))}</span>` : ""}${e.frist ? `<span>Frist ${fmtDate(e.frist)}</span>` : ""}</div>
     ${(e.fotos || []).length ? `<div class="thumbs">${e.fotos.slice(0, 6).map((f) => fotoImg(e.baustelleId, f)).join("")}</div>` : ""}
@@ -939,6 +945,7 @@ async function protokollErstellen(bid) {
   const rel = "pdf/" + name;
   await Filesystem.writeFile({ path: rel, directory: DATA, data: await pdfProtokoll(b, prot, punkte) });
   S.lokal[name] = rel;
+  await protokollWord(b, prot, punkte, true);
   S.protokolle[bid] = S.protokolle[bid] || [];
   upsert(S.protokolle[bid], prot);
   S.queue.push({ art: "protokoll", bid, name, lokal: rel });
@@ -948,7 +955,7 @@ async function protokollErstellen(bid) {
 }
 function protokollFertigSheet(bid, prot) {
   openSheet(`<div class="bar"><h2>Protokoll Nr. ${prot.nr} erstellt</h2><button class="iconbtn" data-act="close-sheet">×</button></div>
-    <div class="hint">☁ Wird automatisch in Dropbox gespeichert: 05-BAUSTELLE/Protokolle/${esc(prot.datei)} – auch ohne Senden.</div>
+    <div class="hint">☁ Wird automatisch in Dropbox gespeichert: 05-BAUSTELLE/Protokolle/${esc(prot.datei)}${prot.wordDatei ? " – dazu dieselbe Fassung als Word-Datei (.docx) zum Bearbeiten am PC" : ""}, auch ohne Senden.</div>
     <button class="btn big" data-act="protokoll-ansehen" data-b="${esc(bid)}" data-id="${esc(prot.id)}">Ansehen</button>
     <button class="btn primary big" data-act="protokoll-senden" data-b="${esc(bid)}" data-id="${esc(prot.id)}">Mail an alle vorbereiten (eM Client)</button>
     <div class="hint">Öffnet nur den Entwurf in eM Client – gesendet wird erst, wenn du dort auf Senden tippst.</div>
@@ -972,6 +979,7 @@ async function protokollNeuErstellen(bid, pid) {
   const rel = "pdf/" + prot.datei;
   await Filesystem.writeFile({ path: rel, directory: DATA, data: await pdfProtokoll(b, prot, punkte) });
   S.lokal[prot.datei] = rel;
+  await protokollWord(b, prot, punkte, !prot.wordDatei);
   upsert(S.protokolle[bid], prot);
   S.queue = S.queue.filter((q) => q.name !== prot.datei);
   S.queue.push({ art: "protokoll", bid, name: prot.datei, lokal: rel });
@@ -989,10 +997,19 @@ async function protokollSenden(bid, pid) {
     : `${du ? "Hallo zusammen" : "Sehr geehrte Damen und Herren"},\n\nanbei das Baustellenprotokoll Nr. ${prot.nr} vom ${fmtDate(prot.datum)} zur Baustelle ${b.name}.\nOffene Punkte: ${offen}. ${du ? "Bitte haltet" : "Wir bitten um Einhaltung"} der angegebenen Fristen${du ? " ein" : ""}.\n\n${einst().gruss || "Mit freundlichen Grüßen"}`;
   await openMail({ bcc: addrs, subject: (it ? `Verbale di cantiere n. ${prot.nr} – ` : `Baustellenprotokoll Nr. ${prot.nr} – `) + b.name, body, files: [rel] });
 }
-async function pdfProtokoll(b, prot, punkte) {
+function protL() {
   const it = einst().sprache === "Italienisch";
-  const L = it ? { titel: "Verbale di cantiere", nr: "n.", datum: "Sopralluogo del", anw: "Presenti", wetter: "Meteo", verf: "Redatto da", zust: "Competenza", frist: "Scadenza", offen: "aperto", erl: "completato", neu: "nuovo", seit: "dal verbale", allg: "Generale", uebers: "Riepilogo", fotos: "Foto" }
+  return it ? { titel: "Verbale di cantiere", nr: "n.", datum: "Sopralluogo del", anw: "Presenti", wetter: "Meteo", verf: "Redatto da", zust: "Competenza", frist: "Scadenza", offen: "aperto", erl: "completato", neu: "nuovo", seit: "dal verbale", allg: "Generale", uebers: "Riepilogo", fotos: "Foto" }
     : { titel: "Baustellenprotokoll", nr: "Nr.", datum: "Begehung am", anw: "Anwesend", wetter: "Wetter", verf: "Verfasst von", zust: "Zuständig", frist: "Frist", offen: "offen", erl: "erledigt", neu: "neu", seit: "seit Protokoll", allg: "Allgemein", uebers: "Übersicht", fotos: "Fotos" };
+}
+// Punkte nach Gewerk gruppiert (gleich für PDF und Word)
+function protGruppen(b, punkte, L) {
+  const gruppe = (e) => { const k = (e.kontaktIds || []).map(kontakt).filter(Boolean)[0]; return k ? k.gewerk : L.allg; };
+  const order = beteiligte(b).map((k) => k.gewerk);
+  return [...groupBy(punkte.map((e) => ({ ...e, _g: gruppe(e) })), "_g")].sort((a, c) => ((a[0] === L.allg) - (c[0] === L.allg)) || (order.indexOf(a[0]) - order.indexOf(c[0])));
+}
+async function pdfProtokoll(b, prot, punkte) {
+  const L = protL();
   const doc = new window.jspdf.jsPDF({ unit: "mm", format: "a4" });
   const W = doc.internal.pageSize.getWidth(), H = doc.internal.pageSize.getHeight(), X = 15, CW = W - 30;
   let y;
@@ -1015,9 +1032,7 @@ async function pdfProtokoll(b, prot, punkte) {
   zeile(L.uebers, `${anzahl.neu} ${L.neu} · ${anzahl.offen} ${L.offen} · ${anzahl.erl} ${L.erl}`);
   y += 3;
   // Punkte nach Gewerk
-  const gruppe = (e) => { const k = (e.kontaktIds || []).map(kontakt).filter(Boolean)[0]; return k ? k.gewerk : L.allg; };
-  const order = beteiligte(b).map((k) => k.gewerk);
-  const gruppen = [...groupBy(punkte.map((e) => ({ ...e, _g: gruppe(e) })), "_g")].sort((a, c) => ((a[0] === L.allg) - (c[0] === L.allg)) || (order.indexOf(a[0]) - order.indexOf(c[0])));
+  const gruppen = protGruppen(b, punkte, L);
   const fotoModus = einst().fotos || "punkt";
   const alleFotos = [];
   const bild = async (name) => { const rel = S.lokal[name]; if (!rel) return null; try { const bl = await (await fetch(fileSrc(rel))).blob(); const bmp = await createImageBitmap(bl); return { url: "data:image/jpeg;base64," + await blobToB64(bl), w: bmp.width, h: bmp.height }; } catch { return null; } };
@@ -1065,6 +1080,99 @@ async function pdfProtokoll(b, prot, punkte) {
   const n = doc.getNumberOfPages();
   for (let i = 1; i <= n; i++) { doc.setPage(i); text("", 8, "normal", 130); doc.text(pdfSafe(`${b.name} · ${L.titel} ${L.nr} ${prot.nr} · ${i}/${n}`), W - X, H - 8, { align: "right" }); }
   return doc.output("datauristring").split(",")[1];
+}
+
+// Protokoll als Word-Datei (zum Weiterbearbeiten am PC)
+async function wordProtokoll(b, prot, punkte) {
+  const D = window.docx; const L = protL();
+  const R = (text, o = {}) => new D.TextRun({ text: String(text ?? ""), size: o.size || 20, bold: !!o.bold, italics: !!o.italic, color: o.color });
+  const P = (runs, o = {}) => new D.Paragraph({ children: Array.isArray(runs) ? runs : [runs], spacing: { after: o.after ?? 60, before: o.before ?? 0 }, indent: o.indent ? { left: o.indent } : undefined, keepNext: !!o.keepNext, alignment: o.align });
+  const fotoModus = einst().fotos || "punkt";
+  const bild = async (name, breiteMm) => {
+    const rel = S.lokal[name]; if (!rel) return null;
+    try {
+      const bl = await (await fetch(fileSrc(rel))).blob(); const bmp = await createImageBitmap(bl);
+      const w = Math.round(breiteMm * 3.78); const h = Math.round(Math.min(w * bmp.height / bmp.width, w * 1.1));
+      return new D.ImageRun({ type: "jpg", data: new Uint8Array(await bl.arrayBuffer()), transformation: { width: Math.round(h * bmp.width / bmp.height), height: h } });
+    } catch { return null; }
+  };
+  const fotoAbsatz = async (namen, breiteMm, indent) => {
+    const imgs = (await Promise.all(namen.map((n) => bild(n, breiteMm)))).filter(Boolean);
+    if (!imgs.length) return [];
+    const runs = []; imgs.forEach((im, i) => { if (i) runs.push(R("  ")); runs.push(im); });
+    return [P(runs, { indent, after: 120 })];
+  };
+  const anzahl = { neu: punkte.filter((e) => e.protokollNr === prot.nr).length, offen: punkte.filter((e) => e.status !== "erledigt").length, erl: punkte.filter((e) => e.status === "erledigt").length };
+  const kopfZeile = (label, wert) => wert ? [P([R(label + ": ", { bold: true, color: "3C3C3C" }), R(wert)])] : [];
+  const kinder = [
+    ...(einst().buero ? [P(R(einst().buero, { size: 17, color: "6E6E6E" }))] : []),
+    P(R(`${L.titel} ${L.nr} ${prot.nr}`, { size: 36, bold: true, color: "1D2428" }), { after: 40 }),
+    new D.Paragraph({ children: [R([b.name, b.ort].filter(Boolean).join("  ·  "), { size: 24, bold: true })], spacing: { after: 160 }, border: { bottom: { style: D.BorderStyle.SINGLE, size: 12, color: "E8A317", space: 4 } } }),
+    ...kopfZeile(L.datum.replace(/ am$| del$/, ""), fmtDate(prot.datum)),
+    ...kopfZeile(L.anw, [...prot.anwesende.map(kontakt).filter(Boolean).map((k) => k.firma + (k.person ? " (" + k.person + ")" : "")), prot.sonstige].filter(Boolean).join(", ")),
+    ...kopfZeile(L.wetter, prot.wetter),
+    ...kopfZeile(L.verf, prot.verfasser),
+    ...kopfZeile(L.uebers, `${anzahl.neu} ${L.neu} · ${anzahl.offen} ${L.offen} · ${anzahl.erl} ${L.erl}`),
+  ];
+  const alleFotos = [];
+  for (const [g, es] of protGruppen(b, punkte, L)) {
+    kinder.push(new D.Paragraph({ children: [R(g, { bold: true, color: "FFFFFF", size: 21 })], shading: { type: D.ShadingType.CLEAR, color: "auto", fill: "1D2428" }, spacing: { before: 240, after: 100 }, keepNext: true }));
+    for (const e of es) {
+      const ks = (e.kontaktIds || []).map(kontakt).filter(Boolean);
+      const erl = e.status === "erledigt";
+      kinder.push(P([R((e.nr || "") + "   ", { bold: true }), R(e.titel || "", { bold: true }), R("   " + (erl ? L.erl : L.offen).toUpperCase(), { bold: true, size: 17, color: erl ? "2F7A4F" : "B4471F" })], { keepNext: true, after: 40 }));
+      const meta = [ks.length ? `${L.zust}: ${ks.map((k) => k.firma).join(", ")}` : "", e.frist ? `${L.frist}: ${fmtDate(e.frist)}` : "", e.protokollNr && e.protokollNr !== prot.nr ? `${L.seit} ${e.protokollNr}` : ""].filter(Boolean).join("   ·   ");
+      if (meta) kinder.push(P(R(meta, { size: 17, color: "5A5A5A" }), { indent: 600, after: 40 }));
+      for (const z of String(e.text || "").split("\n")) kinder.push(P(R(z), { indent: 600, after: 40 }));
+      const fotos = (e.fotos || []).filter((f) => S.lokal[f]);
+      if (fotos.length && fotoModus === "punkt") kinder.push(...await fotoAbsatz(fotos, 52, 600));
+      if (fotos.length && fotoModus === "ende") { alleFotos.push([e.nr, fotos]); kinder.push(P(R(`${L.fotos}: ${fotos.length}`, { italic: true, size: 17, color: "6E6E6E" }), { indent: 600 })); }
+      kinder.push(new D.Paragraph({ children: [], spacing: { after: 120 }, indent: { left: 600 }, border: { bottom: { style: D.BorderStyle.SINGLE, size: 2, color: "DCDCDC", space: 2 } } }));
+    }
+  }
+  if (fotoModus === "ende" && alleFotos.length) {
+    kinder.push(new D.Paragraph({ pageBreakBefore: true, children: [R(L.fotos, { bold: true, size: 28 })], spacing: { after: 160 } }));
+    for (const [nr, fotos] of alleFotos) { kinder.push(P(R(nr || "", { bold: true }), { keepNext: true })); kinder.push(...await fotoAbsatz(fotos, 84, 0)); }
+  }
+  const doc = new D.Document({
+    styles: { default: { document: { run: { font: "Arial", size: 20 } } } },
+    sections: [{
+      properties: { page: { margin: { top: 1000, bottom: 1000, left: 850, right: 850 } } },
+      footers: { default: new D.Footer({ children: [new D.Paragraph({ alignment: D.AlignmentType.RIGHT, children: [R(`${b.name} · ${L.titel} ${L.nr} ${prot.nr} · `, { size: 16, color: "828282" }), new D.TextRun({ children: [D.PageNumber.CURRENT], size: 16, color: "828282" }), R("/", { size: 16, color: "828282" }), new D.TextRun({ children: [D.PageNumber.TOTAL_PAGES], size: 16, color: "828282" })] })] }) },
+      children: kinder,
+    }],
+  });
+  return await D.Packer.toBase64String(doc);
+}
+const wordName = (pdf) => pdf.replace(/\.pdf$/i, ".docx");
+// Word-Datei des Protokolls schreiben und hochladen – aber nie eine von Hand geänderte überschreiben
+async function protokollWord(b, prot, punkte, neu) {
+  const name = wordName(prot.datei);
+  if (!neu && prot.wordRev && S.auth && V.online) {
+    try {
+      const m = await Dropbox.rpc("files/get_metadata", { path: bPath(b, "/Protokolle/" + name) });
+      if (m.rev && m.rev !== prot.wordRev) { toast("Word-Datei wurde von Hand geändert – sie bleibt unverändert, nur das PDF ist neu"); return; }
+    } catch (e) { if (!e.notFound) { toast("Word-Datei nicht geprüft – bleibt unverändert"); return; } }
+  }
+  try {
+    const rel = "pdf/" + name;
+    await Filesystem.writeFile({ path: rel, directory: DATA, data: await wordProtokoll(b, prot, punkte) });
+    S.lokal[name] = rel; prot.wordDatei = name;
+    S.queue = S.queue.filter((q) => q.name !== name);
+    S.queue.push({ art: "protokoll", bid: b.id, name, lokal: rel, word: prot.id });
+  } catch (e) { console.error(e); toast("Word-Datei konnte nicht erstellt werden: " + (e.message || e)); }
+}
+// Am PC: die Word-Datei direkt im Dropbox-Ordner öffnen (Änderungen landen so in Dropbox)
+async function protokollWordOeffnen(bid, pid) {
+  const b = baustelle(bid); const prot = (S.protokolle[bid] || []).find((p) => p.id === pid);
+  const name = prot.wordDatei;
+  if (S.queue.some((q) => q.name === name)) { toast("Word-Datei wird noch hochgeladen – gleich nochmal versuchen"); scheduleSync(100); return; }
+  try {
+    const m = await Dropbox.rpc("files/get_metadata", { path: bPath(b, "/Protokolle/" + name) });
+    const pfad = await window.desktop.invoke("dropbox:lokal", { pfad: m.path_display });
+    if (pfad) { await Mail.open({ path: pfad }); toast("Geöffnet aus deinem Dropbox-Ordner – Speichern in Word genügt"); return; }
+    toast("Dropbox-Ordner auf diesem PC nicht gefunden – öffne die Datei bitte direkt im Dropbox-Ordner (Protokolle)");
+  } catch (e) { toast("Öffnen fehlgeschlagen: " + (e.summary || e.message || e)); }
 }
 
 // ---------- Word-Liste der Beteiligten (Quelle des Adressbuchs) ----------
@@ -1426,9 +1534,58 @@ async function beteiligteSpeichern(b) {
   return "pdf/" + basis + ".pdf";
 }
 
+// ---------- Punkte verschieben (Kästchen rechts festhalten und ziehen) ----------
+let zug = null;
+document.addEventListener("pointerdown", (ev) => {
+  const g = ev.target.closest("[data-griff]"); if (!g) return;
+  const card = g.closest(".card"); const liste = card?.parentElement; if (!liste) return;
+  ev.preventDefault(); ev.stopPropagation();
+  try { g.setPointerCapture(ev.pointerId); } catch {}
+  zug = { card, liste, g, y: ev.clientY, dy: 0, bewegt: false };
+  card.classList.add("zieht"); try { navigator.vibrate?.(15); } catch {}
+}, true);
+document.addEventListener("pointermove", (ev) => {
+  if (!zug) return; ev.preventDefault();
+  const { card, liste } = zug;
+  zug.dy = ev.clientY - zug.y; zug.bewegt = zug.bewegt || Math.abs(zug.dy) > 4;
+  card.style.transform = `translateY(${zug.dy}px)`;
+  // Am Rand mitscrollen
+  const vh = window.innerHeight; if (ev.clientY < 90) window.scrollBy(0, -12); else if (ev.clientY > vh - 110) window.scrollBy(0, 12);
+  // Nachbarn überholt? Dann im DOM tauschen
+  const geschw = [...liste.children].filter((c) => c !== card && c.classList.contains("card"));
+  const mitte = card.getBoundingClientRect().top + card.offsetHeight / 2;
+  const vorher = card.previousElementSibling, nachher = card.nextElementSibling;
+  if (nachher?.classList.contains("card")) { const r = nachher.getBoundingClientRect(); if (mitte > r.top + r.height / 2) { const alt = card.getBoundingClientRect().top; liste.insertBefore(nachher, card); zug.y += card.getBoundingClientRect().top - alt; zug.dy = ev.clientY - zug.y; card.style.transform = `translateY(${zug.dy}px)`; } }
+  if (vorher?.classList.contains("card")) { const r = vorher.getBoundingClientRect(); if (mitte < r.top + r.height / 2) { const alt = card.getBoundingClientRect().top; liste.insertBefore(card, vorher); zug.y += card.getBoundingClientRect().top - alt; zug.dy = ev.clientY - zug.y; card.style.transform = `translateY(${zug.dy}px)`; } }
+  void geschw;
+}, { capture: true, passive: false });
+const zugEnde = () => {
+  if (!zug) return;
+  const { card, liste, bewegt } = zug; zug = null;
+  card.classList.remove("zieht"); card.style.transform = "";
+  if (!bewegt) return;
+  const bid = card.dataset.b, id = card.dataset.id;
+  const e = (S.eintraege[bid] || []).find((x) => x.id === id); if (!e) return;
+  // Anzeige-Reihenfolge aller Punkte (ohne den verschobenen)
+  const absteigend = !S.umgekehrt;
+  const D = eintraegeVon(bid).filter((x) => x.id !== id); if (!absteigend) D.reverse();
+  const vor = card.previousElementSibling?.dataset?.id, nach = card.nextElementSibling?.dataset?.id;
+  let i = vor ? D.findIndex((x) => x.id === vor) + 1 : nach ? D.findIndex((x) => x.id === nach) : -1;
+  if (i < 0) { render(); return; }
+  const kp = D[i - 1] ? reihe(D[i - 1]) : null, kn = D[i] ? reihe(D[i]) : null;
+  const schritt = absteigend ? -60000 : 60000;
+  e.pos = kp != null && kn != null ? (kp + kn) / 2 : kp != null ? kp + schritt : kn != null ? kn - schritt : reihe(e);
+  upsert(S.eintraege[bid], e); changed();
+};
+document.addEventListener("pointerup", zugEnde, true);
+document.addEventListener("pointercancel", zugEnde, true);
+// Tippen auf das Kästchen öffnet den Punkt nicht
+document.addEventListener("click", (ev) => { if (ev.target.closest("[data-griff]")) { ev.stopImmediatePropagation(); ev.preventDefault(); } }, true);
+
 // ---------- Lange drücken: Löschen ----------
 let lp = null;
 document.addEventListener("pointerdown", (ev) => {
+  if (ev.target.closest("[data-griff]")) return;
   const el = ev.target.closest("[data-lp]"); if (!el || ev.target.closest("[data-act]:not([data-lp])")) return;
   lp = { el, x: ev.clientX, y: ev.clientY, t: setTimeout(() => { lp.fired = true; try { navigator.vibrate?.(30); } catch {} loeschenFragen(el.dataset.lp, el.dataset.b, el.dataset.id); }, 550) };
 });
@@ -1446,7 +1603,7 @@ function loeschenFragen(art, bid, id) {
     const p = (S.protokolle[bid] || []).find((x) => x.id === id); if (!p) return;
     const letztes = protokolleVon(bid)[0]?.id === id;
     titel = `Protokoll Nr. ${p.nr} löschen?`;
-    info = `<div>Vom ${fmtDate(p.datum)}. Das PDF wird auch aus Dropbox gelöscht.</div>${letztes ? `<div class="hint">Die Punkte daraus gelten danach wieder als „neu“ und kommen ins nächste Protokoll.</div>` : `<div class="hint">Es ist nicht das neueste Protokoll – die Nummerierung der späteren bleibt, wie sie ist.</div>`}`;
+    info = `<div>Vom ${fmtDate(p.datum)}. PDF und Word-Datei werden auch aus Dropbox gelöscht.</div>${letztes ? `<div class="hint">Die Punkte daraus gelten danach wieder als „neu“ und kommen ins nächste Protokoll.</div>` : `<div class="hint">Es ist nicht das neueste Protokoll – die Nummerierung der späteren bleibt, wie sie ist.</div>`}`;
   }
   openSheet(`<div class="bar"><h2>${titel}</h2><button class="iconbtn" data-act="close-sheet">×</button></div>${info}
     <button class="btn big danger" data-act="loeschen-ok" data-art="${art}" data-b="${esc(bid)}" data-id="${esc(id)}">Löschen</button>
@@ -1462,7 +1619,11 @@ async function loeschen(art, bid, id) {
     const letztes = protokolleVon(bid)[0]?.id === id;
     upsert(S.protokolle[bid], { ...p, geloescht: true });
     if (letztes) for (const e of S.eintraege[bid] || []) if (e.protokollNr === p.nr) { delete e.protokollNr; delete e.nr; upsert(S.eintraege[bid], e); }
-    S.queue = S.queue.filter((q) => q.name !== p.datei);
+    S.queue = S.queue.filter((q) => q.name !== p.datei && q.name !== p.wordDatei);
+    if (p.wordDatei) {
+      if (S.lokal[p.wordDatei]) { try { await Filesystem.deleteFile({ path: S.lokal[p.wordDatei], directory: DATA }); } catch {} delete S.lokal[p.wordDatei]; }
+      try { await Dropbox.rpc("files/delete_v2", { path: bPath(baustelle(bid), "/Protokolle/" + p.wordDatei) }); } catch {}
+    }
     if (p.datei) {
       if (S.lokal[p.datei]) { try { await Filesystem.deleteFile({ path: S.lokal[p.datei], directory: DATA }); } catch {} delete S.lokal[p.datei]; }
       const b = baustelle(bid);
@@ -1494,6 +1655,8 @@ document.addEventListener("click", async (ev) => {
     case "baustelle-edit": sheetBaustelle(id); break;
     case "tab": V.tab = t.dataset.v; render(); break;
     case "filter": V.filter = t.dataset.v; render(); break;
+    case "protokoll-word": protokollWordOeffnen(t.dataset.b, t.dataset.id); break;
+    case "umkehren": S.umgekehrt = !S.umgekehrt; persist(); render(); break;
     case "eintrag-neu": sheetEintrag(id, null); break;
     case "begehung": sheetBegehung(id); break;
     case "protokoll-neu": sheetProtokoll(id); break;
