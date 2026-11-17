@@ -269,14 +269,14 @@ function viewBaustelle(id) {
   let body;
   if (V.tab === "eintraege") {
     body = `<div class="chips"><button class="chip" aria-pressed="${V.filter === "offen"}" data-act="filter" data-v="offen">Offen (${es.filter((e) => e.status !== "erledigt").length})</button><button class="chip" aria-pressed="${V.filter === "alle"}" data-act="filter" data-v="alle">Alle (${es.length})</button><button class="chip" aria-pressed="${!!S.umgekehrt}" data-act="umkehren">⇅ Umkehren</button></div>
-    <div class="stack" id="punkte-liste">${shown.map((e) => entryCard(e)).join("") || `<div class="empty">${V.filter === "offen" ? "Keine offenen Punkte." : "Noch keine Einträge."}</div>`}</div>
+    <div class="stack" id="punkte-liste" data-zug="punkte">${shown.map((e) => entryCard(e)).join("") || `<div class="empty">${V.filter === "offen" ? "Keine offenen Punkte." : "Noch keine Einträge."}</div>`}</div>
     ${shown.length ? `<div class="hint">Reihenfolge ändern: das Kästchen ⠿ rechts festhalten und den Punkt nach oben oder unten ziehen. Zum Löschen lange auf einen Punkt drücken.</div>` : ""}`;
   } else if (V.tab === "protokolle") {
     body = `<button class="btn primary" data-act="protokoll-neu" data-id="${esc(id)}">+ Protokoll erstellen</button>
     <div class="hint">Zum Löschen lange auf ein Protokoll drücken.</div>
     <div class="stack">${prots.map((p) => `<div class="card" data-lp="protokoll" data-b="${esc(id)}" data-id="${esc(p.id)}"><div class="title">Protokoll Nr. ${p.nr} · ${fmtDate(p.datum)}</div>
       <div class="meta"><span>${p.punkte?.length || 0} ${p.punkte?.length === 1 ? "Punkt" : "Punkte"}</span>${p.verfasser ? `<span>${esc(p.verfasser)}</span>` : ""}<span>${S.queue.some((q) => q.name === p.datei || q.name === p.wordDatei) ? "⏳ wird in Dropbox gespeichert" : "☁ in Dropbox gespeichert"}${p.wordDatei ? " · PDF + Word" : ""}</span></div>
-      <div class="row"><button class="btn primary" data-act="protokoll-ansehen" data-b="${esc(id)}" data-id="${esc(p.id)}">Ansehen</button>${PC && p.wordDatei ? `<button class="btn" data-act="protokoll-word" data-b="${esc(id)}" data-id="${esc(p.id)}">In Word bearbeiten</button>` : ""}<button class="btn" data-act="protokoll-senden" data-b="${esc(id)}" data-id="${esc(p.id)}">Mail vorbereiten</button>${p.nr === prots[0].nr ? `<button class="btn" data-act="protokoll-neu-erstellen" data-b="${esc(id)}" data-id="${esc(p.id)}">Neu erstellen</button>` : ""}</div></div>`).join("") || `<div class="empty">Noch kein Protokoll.</div>`}</div>`;
+      <div class="row"><button class="btn primary" data-act="protokoll-ansehen" data-b="${esc(id)}" data-id="${esc(p.id)}">Ansehen</button>${PC && p.wordDatei ? `<button class="btn" data-act="protokoll-word" data-b="${esc(id)}" data-id="${esc(p.id)}">In Word bearbeiten</button>` : ""}<button class="btn" data-act="protokoll-senden" data-b="${esc(id)}" data-id="${esc(p.id)}">Mail vorbereiten</button>${p.nr === prots[0].nr ? `<button class="btn" data-act="protokoll-bearbeiten" data-b="${esc(id)}" data-id="${esc(p.id)}">Bearbeiten</button>` : ""}</div></div>`).join("") || `<div class="empty">Noch kein Protokoll.</div>`}</div>`;
   } else {
     body = `<div class="row"><button class="btn primary" data-act="beteiligte-waehlen">+ Aus Adressbuch</button><button class="btn" data-act="beteiligte-speichern">Liste in Dropbox speichern (PDF + Word)</button><button class="btn" data-act="mail-alle">Liste an alle (Mail vorbereiten)</button></div>
     ${[...groupBy(bet, "gewerk")].map(([g, ks]) => `<section class="group"><h3>${esc(g)}</h3>${ks.map((k) => contactCard(k, id)).join("")}</section>`).join("") || `<div class="empty">Noch keine Beteiligten. Tippe auf „Aus Adressbuch“.</div>`}`;
@@ -494,7 +494,8 @@ async function openMail({ to = [], bcc = [], subject = "", body = "", files = []
 }
 
 // ---------- Eintrag ----------
-function sheetEintrag(bid, eid) {
+function sheetEintrag(bid, eid, zurueck) {
+  const fertig = () => { closeSheet(); if (zurueck) zurueck(); };
   const b = baustelle(bid);
   const existing = eid ? (S.eintraege[bid] || []).find((x) => x.id === eid) : null;
   const E = existing ? JSON.parse(JSON.stringify(existing)) : { id: newId("e"), baustelleId: bid, ts: Date.now(), titel: "", art: "Mangel", text: "", kontaktIds: [], frist: "", status: "offen", fotos: [], mail: { betreff: "", text: "" }, mailGesendet: false };
@@ -626,16 +627,16 @@ function sheetEintrag(bid, eid) {
       } catch (e) { toast("Mail: " + (e.message || e)); }
       draw(); return;
     }
-    if (x === "save") { if (saveEntry()) { closeSheet(); toast("Gespeichert"); } else toast("Eintrag ist leer"); return; }
+    if (x === "save") { if (saveEntry()) { fertig(); toast("Gespeichert"); } else toast("Eintrag ist leer"); return; }
     if (x === "del") {
       if (!t.dataset.confirm) { t.dataset.confirm = "1"; t.textContent = "Wirklich löschen? Nochmal tippen"; return; }
-      upsert(S.eintraege[bid], { ...E, geloescht: true }); closeSheet(); changed(); return;
+      upsert(S.eintraege[bid], { ...E, geloescht: true }); changed(); fertig(); return;
     }
     if (x === "close") {
       read();
       const dirty = !existing ? (E.text || E.fotos.length) : JSON.stringify({ ...E, mail: E.mail }) !== JSON.stringify(existing);
       if (dirty && !t.dataset.confirm) { t.dataset.confirm = "1"; toast("Nicht gespeichert – nochmal × tippen zum Verwerfen"); return; }
-      closeSheet();
+      fertig();
     }
   };
   draw();
@@ -827,7 +828,14 @@ function sheetBegehung(bid) {
       <div class="partial" id="r-partial"></div>
       <textarea id="r-text" placeholder="z. B. Fliesenleger, im Bad OG ist die Silikonfuge gerissen, bis Freitag richten">${esc(p.text)}</textarea>
       <button class="btn primary big" data-x="weiter">Nächster Punkt ›</button>
-      ${R.punkte.length > 1 ? `<div class="stack"><div class="hint">Bisher erfasst – antippen zum Ändern</div>${R.punkte.map((q, i) => `<button class="punkt ${i === R.idx ? "aktuell" : ""}" data-x="springe" data-i="${i}"><span><span class="nr">${i + 1}.</span> ${esc((q.text || "").slice(0, 90) || "(ohne Text)")}</span><span class="hint">${q.fotos.length} Foto${q.fotos.length === 1 ? "" : "s"}</span></button>`).join("")}</div>` : ""}`;
+      ${R.punkte.length > 1 ? `<div class="hint" style="margin-top:8px">Bisher erfasst – antippen zum Ändern, ⠿ ziehen zum Verschieben, × zum Löschen</div>
+      ${R.loeschFrage != null && R.punkte[R.loeschFrage] ? `<div class="banner">Punkt ${R.loeschFrage + 1} wirklich löschen?<div class="row" style="margin-top:8px"><button class="btn danger" data-x="punkt-weg-ok">Löschen</button><button class="btn" data-x="punkt-weg-nein">Abbrechen</button></div></div>` : ""}
+      <div class="stack" id="r-liste" data-zug="begehung">${R.punkte.map((q, i) => `<div class="punkt mitgriff ${i === R.idx ? "aktuell" : ""}" data-x="springe" data-i="${i}" data-id="${esc(q.id)}"><span><span class="nr">${i + 1}.</span> ${esc((q.text || "").slice(0, 90) || "(ohne Text)")}</span><span class="hint">${q.fotos.length} Foto${q.fotos.length === 1 ? "" : "s"}</span><span class="punkt-weg" data-x="punkt-weg" data-i="${i}" aria-label="Löschen">×</span><span class="griff" data-griff aria-label="Verschieben">⠿</span></div>`).join("")}</div>` : ""}`;
+    const liste = document.getElementById("r-liste");
+    if (liste) liste.addEventListener("umsortiert", (ev) => {
+      const akt = aktuell(); const nach = new Map(R.punkte.map((q) => [q.id, q]));
+      R.punkte = ev.detail.ids.map((id) => nach.get(id)).filter(Boolean); R.idx = Math.max(0, R.punkte.indexOf(akt)); speichern(); drawAufnahme();
+    });
   };
   const leseText = () => { const ta = document.getElementById("r-text"); if (ta && R) { aktuell().text = ta.value; speichern(); } };
   const addFoto = async (path) => {
@@ -880,6 +888,15 @@ function sheetBegehung(bid) {
       if (leer >= 0) R.idx = leer; else neuerPunkt();
       drawAufnahme(); $panel.scrollTop = 0; return;
     }
+    if (x === "punkt-weg") { leseText(); R.loeschFrage = +t.dataset.i; drawAufnahme(); return; }
+    if (x === "punkt-weg-nein") { delete R.loeschFrage; drawAufnahme(); return; }
+    if (x === "punkt-weg-ok") {
+      if (Diktat.aktiv) await Diktat.stop();
+      const i = R.loeschFrage; delete R.loeschFrage;
+      const akt = aktuell(); R.punkte.splice(i, 1);
+      if (!R.punkte.length) neuerPunkt(); else R.idx = Math.max(0, R.punkte.indexOf(akt) >= 0 ? R.punkte.indexOf(akt) : Math.min(i, R.punkte.length - 1));
+      speichern(); drawAufnahme(); toast("Punkt gelöscht"); return;
+    }
     if (x === "springe") { if (Diktat.aktiv) await Diktat.stop(); leseText(); R.idx = +t.dataset.i; speichern(); drawAufnahme(); $panel.scrollTop = 0; return; }
     if (x === "beenden") {
       if (Diktat.aktiv) await Diktat.stop();
@@ -895,9 +912,10 @@ function sheetBegehung(bid) {
         res = punkte.map((q, i) => ({ i, titel: (q.text || "Foto").split(/[.\n,]/)[0].slice(0, 60), art: "Mangel", beschreibung: q.text, kontaktIds: zustaendigRaten(q.text || "", bet), frist: "" }));
       }
       S.eintraege[bid] = S.eintraege[bid] || [];
+      const basis = Date.now();
       punkte.forEach((q, i) => {
         const r = res[i] || {};
-        const E = { id: newId("e"), baustelleId: bid, ts: q.ts || Date.now(), begehungId: R.id, titel: r.titel, art: r.art || "Mangel", text: r.beschreibung || q.text, diktat: q.text,
+        const E = { id: newId("e"), baustelleId: bid, ts: q.ts || Date.now(), pos: basis + i * 1000, begehungId: R.id, titel: r.titel, art: r.art || "Mangel", text: r.beschreibung || q.text, diktat: q.text,
           kontaktIds: r.kontaktIds || [], frist: r.frist || "", status: "offen", fotos: q.fotos, mail: { betreff: "", text: "" }, mailGesendet: false };
         upsert(S.eintraege[bid], E);
         for (const name of q.fotos) S.queue.push({ art: "foto", bid, name, lokal: S.lokal[name] });
@@ -936,6 +954,16 @@ function sheetProtokoll(bid) {
   V.protSel = sel;
   $panel.onclick = (ev) => { const c = ev.target.closest("[data-pa]"); if (!c) return; const id = c.dataset.pa; sel.has(id) ? sel.delete(id) : sel.add(id); c.setAttribute("aria-pressed", sel.has(id)); };
 }
+// Punkte so ordnen, wie sie im Protokoll stehen (Gewerk, darin eigene Reihenfolge) und die neuen lückenlos nummerieren
+function nummerieren(b, prot, punkte) {
+  const sortiert = punkte.slice().sort((a, c) => reihe(a) - reihe(c));
+  const nachId = new Map(sortiert.map((e) => [e.id, e]));
+  const geordnet = protGruppen(b, sortiert, protL()).flatMap(([, es]) => es.map((x) => nachId.get(x.id)));
+  let lauf = 0;
+  for (const e of geordnet) if (e.protokollNr === prot.nr) { lauf++; const nr = `${prot.nr}.${String(lauf).padStart(2, "0")}`; if (e.nr !== nr) { e.nr = nr; upsert(S.eintraege[b.id], e); } }
+  prot.punkte = geordnet.map((e) => e.id);
+  return geordnet;
+}
 async function protokollErstellen(bid) {
   const b = baustelle(bid);
   const nr = (protokolleVon(bid)[0]?.nr || 0) + 1;
@@ -943,11 +971,8 @@ async function protokollErstellen(bid) {
   const prot = { id: newId("pr"), nr, datum: document.getElementById("p-datum").value || today(), anwesende: [...V.protSel],
     sonstige: document.getElementById("p-sonst").value.trim(), wetter: document.getElementById("p-wetter").value.trim(), verfasser: S.meinName || S.auth?.name || "", erstellt: Date.now(), stand: Date.now(), punkte: [] };
   closeSheet(); toast("Protokoll wird erstellt …");
-  let lauf = 0;
-  for (const e of punkte) {
-    if (!e.protokollNr) { lauf++; e.nr = `${nr}.${String(lauf).padStart(2, "0")}`; e.protokollNr = nr; upsert(S.eintraege[bid], e); }
-    prot.punkte.push(e.id);
-  }
+  for (const e of punkte) if (!e.protokollNr) { e.protokollNr = nr; upsert(S.eintraege[bid], e); }
+  const geordnet = nummerieren(b, prot, punkte); punkte.length = 0; punkte.push(...geordnet);
   // Fotos des Partners für das PDF holen
   if (einst().fotos !== "keine") for (const e of punkte) for (const f of e.fotos || []) { try { await ensureLocal(bid, f); } catch {} }
   const name = `Protokoll_${String(nr).padStart(2, "0")}_${slug(b.name)}_${prot.datum}.pdf`;
@@ -969,7 +994,8 @@ function protokollFertigSheet(bid, prot) {
     <button class="btn big" data-act="protokoll-ansehen" data-b="${esc(bid)}" data-id="${esc(prot.id)}">Ansehen</button>
     <button class="btn primary big" data-act="protokoll-senden" data-b="${esc(bid)}" data-id="${esc(prot.id)}">Mail an alle vorbereiten (eM Client)</button>
     <div class="hint">Öffnet nur den Entwurf in eM Client – gesendet wird erst, wenn du dort auf Senden tippst.</div>
-    <div class="hint">Fehler gefunden? Schließen, den Punkt unter „Punkte“ korrigieren und im Tab „Protokolle“ auf „Neu erstellen“ tippen.</div>`);
+    <button class="btn big" data-act="protokoll-bearbeiten" data-b="${esc(bid)}" data-id="${esc(prot.id)}">Bearbeiten</button>
+    <div class="hint">Fehler gefunden? „Bearbeiten“: Anwesende, Punkte und Reihenfolge ändern, dann neu erstellen.</div>`);
 }
 async function protokollAnsehen(bid, pid) {
   const prot = (S.protokolle[bid] || []).find((p) => p.id === pid);
@@ -984,15 +1010,18 @@ async function protokollAnsehen(bid, pid) {
   }
   await Mail.open({ path: absPath(pfad), mime: "application/pdf" });
 }
-async function protokollNeuErstellen(bid, pid) {
+async function protokollNeuErstellen(bid, pid, kopf) {
   const b = baustelle(bid);
   const prot = { ...(S.protokolle[bid] || []).find((p) => p.id === pid) };
+  if (kopf) Object.assign(prot, kopf);
   if (S.meinName) prot.verfasser = S.meinName;   // geänderten Namen übernehmen
   prot.stand = Date.now();
-  const punkte = prot.punkte.map((id) => (S.eintraege[bid] || []).find((e) => e.id === id)).filter((e) => e && !e.geloescht);
+  const raus = new Set(prot.raus || []);
+  const alle = S.eintraege[bid] || [];
+  let punkte = prot.punkte.map((id) => alle.find((e) => e.id === id)).filter((e) => e && !e.geloescht && !raus.has(e.id));
   // neue Punkte seit dem Erstellen dieses Protokolls ebenfalls aufnehmen
-  let lauf = punkte.filter((e) => e.protokollNr === prot.nr).length;
-  for (const e of eintraegeVon(bid).reverse()) if (!e.protokollNr) { lauf++; e.nr = `${prot.nr}.${String(lauf).padStart(2, "0")}`; e.protokollNr = prot.nr; upsert(S.eintraege[bid], e); punkte.push(e); prot.punkte.push(e.id); }
+  for (const e of eintraegeVon(bid)) if (!e.protokollNr && !raus.has(e.id) && !punkte.includes(e)) { e.protokollNr = prot.nr; upsert(S.eintraege[bid], e); punkte.push(e); }
+  punkte = nummerieren(b, prot, punkte);
   toast("Protokoll wird neu erstellt …");
   if (einst().fotos !== "keine") for (const e of punkte) for (const f of e.fotos || []) { try { await ensureLocal(bid, f); } catch {} }
   const rel = "pdf/" + prot.datei;
@@ -1004,6 +1033,77 @@ async function protokollNeuErstellen(bid, pid) {
   S.queue.push({ art: "protokoll", bid, name: prot.datei, lokal: rel });
   changed();
   protokollFertigSheet(bid, prot);
+}
+// Neuestes Protokoll bearbeiten: Kopf, Punkte ändern/verschieben/herausnehmen/löschen, dann neu erstellen
+function sheetProtokollBearbeiten(bid, pid) {
+  const b = baustelle(bid); const bet = beteiligte(b);
+  const prot = () => (S.protokolle[bid] || []).find((p) => p.id === pid);
+  V.protKopf = V.protKopf?.pid === pid ? V.protKopf : { pid, datum: prot().datum, anwesende: [...(prot().anwesende || [])], sonstige: prot().sonstige || "", wetter: prot().wetter || "" };
+  const K = V.protKopf;
+  const lesen = () => { const g = (id) => document.getElementById(id); if (g("pb-datum")) { K.datum = g("pb-datum").value || K.datum; K.sonstige = g("pb-sonst").value.trim(); K.wetter = g("pb-wetter").value.trim(); } };
+  const L = protL();
+  const draw = () => {
+    const P = prot(); const raus = new Set(P.raus || []); const alle = S.eintraege[bid] || [];
+    const drin = P.punkte.map((id) => alle.find((e) => e.id === id)).filter((e) => e && !e.geloescht && !raus.has(e.id));
+    const neu = eintraegeVon(bid).filter((e) => !e.protokollNr && !raus.has(e.id) && !drin.includes(e));
+    const liste = [...drin, ...neu].sort((a, c) => reihe(a) - reihe(c));
+    const gruppen = protGruppen(b, liste, L);
+    const rausListe = [...raus].map((id) => alle.find((e) => e.id === id)).filter((e) => e && !e.geloescht);
+    const karte = (e) => `<div class="card mitgriff" data-x="edit" data-id="${esc(e.id)}">
+        <div class="row"><span class="pill art">${e.protokollNr === P.nr || !e.protokollNr ? (e.nr && e.protokollNr === P.nr ? "Nr. " + esc(e.nr) : "neu") : "Nr. " + esc(e.nr || "") + " (älter)"}</span><span class="pill ${e.status === "erledigt" ? "erledigt" : "offen"}">${e.status === "erledigt" ? "erledigt" : "offen"}</span></div>
+        <div class="title">${esc(e.titel || "Ohne Titel")}</div>
+        <div class="row"><button class="btn klein" data-x="raus" data-id="${esc(e.id)}">Aus Protokoll nehmen</button><button class="btn klein danger" data-x="del" data-id="${esc(e.id)}">Löschen</button></div>
+        <span class="griff" data-griff aria-label="Verschieben">⠿</span></div>`;
+    $panel.innerHTML = `<div class="bar"><h2>Protokoll Nr. ${P.nr} bearbeiten</h2><button class="iconbtn" data-x="close">×</button></div>
+      <label for="pb-datum">Datum der Begehung<input type="date" id="pb-datum" value="${esc(K.datum)}"></label>
+      <div class="box"><h3>Anwesend</h3><div class="chips">${bet.map((k) => `<button class="chip" data-x="anw" data-id="${esc(k.id)}" aria-pressed="${K.anwesende.includes(k.id)}">${esc(k.gewerk)}: ${esc(k.firma)}</button>`).join("")}</div>
+        <label for="pb-sonst">Weitere Anwesende<input type="text" id="pb-sonst" value="${esc(K.sonstige)}"></label>
+        <label for="pb-wetter">Wetter<input type="text" id="pb-wetter" value="${esc(K.wetter)}"></label></div>
+      <div class="hint">Punkt antippen = ändern · ⠿ ziehen = Reihenfolge im Gewerk ändern${neu.length ? ` · „neu“ = seit dem Erstellen dazugekommen, kommt beim Neu-Erstellen hinein` : ""}</div>
+      ${gruppen.map(([g, es]) => `<section class="group"><h3>${esc(g)}</h3><div class="stack" data-zug="protokoll" data-g="${esc(g)}">${es.map((x) => karte(alle.find((e) => e.id === x.id))).join("")}</div></section>`).join("") || `<div class="empty">Keine Punkte im Protokoll.</div>`}
+      ${rausListe.length ? `<div class="box"><h3>Herausgenommen (${rausListe.length})</h3><div class="hint">Kommen ins nächste Protokoll, falls noch offen.</div>${rausListe.map((e) => `<div class="row" style="align-items:center"><span class="grow">${esc(e.titel || "Ohne Titel")}</span><button class="btn klein" data-x="rein" data-id="${esc(e.id)}">Wieder aufnehmen</button></div>`).join("")}</div>` : ""}
+      <button class="btn primary big" data-x="go">PDF + Word neu erstellen</button>
+      <div class="hint">Nummern werden dabei lückenlos neu vergeben (in der Reihenfolge wie im Protokoll).</div>`;
+    for (const el of $panel.querySelectorAll('[data-zug="protokoll"]')) el.addEventListener("umsortiert", (ev) => {
+      const id = ev.detail.id; const card = el.querySelector(`[data-id="${CSS.escape(id)}"]`);
+      const D = ev.detail.ids.filter((x) => x !== id).map((x) => (S.eintraege[bid] || []).find((e) => e.id === x));
+      // D in aktueller Protokoll-Reihenfolge (aufsteigend) – die Gruppe vor dem Verschieben
+      const vorher = liste.filter((e) => e.id !== id && D.includes(e));
+      zwischenSetzen(bid, id, vorher, card.previousElementSibling?.dataset?.id, card.nextElementSibling?.dataset?.id, false);
+      lesen(); changed(); draw();
+    });
+  };
+  openSheet("");
+  $panel.onclick = async (ev) => {
+    const t = ev.target.closest("[data-x]"); if (!t) return;
+    const x = t.dataset.x; const id = t.dataset.id;
+    lesen();
+    if (x === "close") { closeSheet(); return; }
+    if (x === "anw") { K.anwesende = K.anwesende.includes(id) ? K.anwesende.filter((a) => a !== id) : [...K.anwesende, id]; t.setAttribute("aria-pressed", K.anwesende.includes(id)); return; }
+    if (x === "edit") { closeSheet(); sheetEintrag(bid, id, () => sheetProtokollBearbeiten(bid, pid)); return; }
+    if (x === "raus" || x === "rein") {
+      const P = { ...prot() }; P.raus = (P.raus || []).filter((r) => r !== id);
+      if (x === "raus") {
+        P.raus.push(id); P.punkte = P.punkte.filter((r) => r !== id);
+        const e = (S.eintraege[bid] || []).find((q) => q.id === id);
+        if (e?.protokollNr === P.nr) { delete e.protokollNr; delete e.nr; upsert(S.eintraege[bid], e); }
+      }
+      upsert(S.protokolle[bid], P); changed(); draw(); return;
+    }
+    if (x === "del") {
+      if (!t.dataset.confirm) { t.dataset.confirm = "1"; t.textContent = "Wirklich? Nochmal tippen"; return; }
+      const e = (S.eintraege[bid] || []).find((q) => q.id === id);
+      if (e) upsert(S.eintraege[bid], { ...e, geloescht: true });
+      const P = { ...prot() }; P.punkte = P.punkte.filter((r) => r !== id); upsert(S.protokolle[bid], P);
+      changed(); draw(); toast("Punkt gelöscht"); return;
+    }
+    if (x === "go") {
+      const kopf = { datum: K.datum, anwesende: K.anwesende, sonstige: K.sonstige, wetter: K.wetter };
+      delete V.protKopf; closeSheet();
+      try { await protokollNeuErstellen(bid, pid, kopf); } catch (e) { console.error(e); toast("Neu erstellen: " + (e.message || e)); }
+    }
+  };
+  draw();
 }
 async function protokollSenden(bid, pid) {
   const b = baustelle(bid); const prot = (S.protokolle[bid] || []).find((p) => p.id === pid);
@@ -1553,52 +1653,58 @@ async function beteiligteSpeichern(b) {
   return "pdf/" + basis + ".pdf";
 }
 
-// ---------- Punkte verschieben (Kästchen rechts festhalten und ziehen) ----------
+// ---------- Verschieben (Kästchen ⠿ festhalten und ziehen) ----------
+// Liste: Element mit data-zug="punkte|begehung|protokoll"; Einträge: Kinder mit data-id.
 let zug = null;
+const zugKinder = (liste) => [...liste.children].filter((c) => c.dataset.id);
 document.addEventListener("pointerdown", (ev) => {
   const g = ev.target.closest("[data-griff]"); if (!g) return;
-  const card = g.closest(".card"); const liste = card?.parentElement; if (!liste) return;
+  const liste = g.closest("[data-zug]"); const card = liste && zugKinder(liste).find((c) => c.contains(g)); if (!card) return;
   ev.preventDefault(); ev.stopPropagation();
   try { g.setPointerCapture(ev.pointerId); } catch {}
-  zug = { card, liste, g, y: ev.clientY, dy: 0, bewegt: false };
+  zug = { card, liste, y: ev.clientY, dy: 0, bewegt: false, start: zugKinder(liste).map((c) => c.dataset.id).join() };
   card.classList.add("zieht"); try { navigator.vibrate?.(15); } catch {}
 }, true);
 document.addEventListener("pointermove", (ev) => {
   if (!zug) return; ev.preventDefault();
   const { card, liste } = zug;
-  zug.dy = ev.clientY - zug.y; zug.bewegt = zug.bewegt || Math.abs(zug.dy) > 4;
-  card.style.transform = `translateY(${zug.dy}px)`;
-  // Am Rand mitscrollen
-  const vh = window.innerHeight; if (ev.clientY < 90) window.scrollBy(0, -12); else if (ev.clientY > vh - 110) window.scrollBy(0, 12);
-  // Nachbarn überholt? Dann im DOM tauschen
-  const geschw = [...liste.children].filter((c) => c !== card && c.classList.contains("card"));
+  const setzen = () => { zug.dy = ev.clientY - zug.y; card.style.transform = `translateY(${zug.dy}px)`; };
+  setzen(); zug.bewegt = zug.bewegt || Math.abs(zug.dy) > 4;
+  const scroller = card.closest(".panel, #panel") || null; const vh = window.innerHeight;
+  const sc = (d) => { if (scroller && scroller.scrollHeight > scroller.clientHeight) scroller.scrollBy(0, d); else window.scrollBy(0, d); };
+  if (ev.clientY < 90) sc(-12); else if (ev.clientY > vh - 110) sc(12);
   const mitte = card.getBoundingClientRect().top + card.offsetHeight / 2;
-  const vorher = card.previousElementSibling, nachher = card.nextElementSibling;
-  if (nachher?.classList.contains("card")) { const r = nachher.getBoundingClientRect(); if (mitte > r.top + r.height / 2) { const alt = card.getBoundingClientRect().top; liste.insertBefore(nachher, card); zug.y += card.getBoundingClientRect().top - alt; zug.dy = ev.clientY - zug.y; card.style.transform = `translateY(${zug.dy}px)`; } }
-  if (vorher?.classList.contains("card")) { const r = vorher.getBoundingClientRect(); if (mitte < r.top + r.height / 2) { const alt = card.getBoundingClientRect().top; liste.insertBefore(card, vorher); zug.y += card.getBoundingClientRect().top - alt; zug.dy = ev.clientY - zug.y; card.style.transform = `translateY(${zug.dy}px)`; } }
-  void geschw;
+  const tausch = (nachbar, davor) => { const alt = card.getBoundingClientRect().top; davor ? liste.insertBefore(card, nachbar) : liste.insertBefore(nachbar, card); zug.y += card.getBoundingClientRect().top - alt; setzen(); };
+  const nach = card.nextElementSibling, vor = card.previousElementSibling;
+  if (nach?.dataset.id) { const r = nach.getBoundingClientRect(); if (mitte > r.top + r.height / 2) tausch(nach, false); }
+  if (vor?.dataset.id) { const r = vor.getBoundingClientRect(); if (mitte < r.top + r.height / 2) tausch(vor, true); }
 }, { capture: true, passive: false });
 const zugEnde = () => {
   if (!zug) return;
-  const { card, liste, bewegt } = zug; zug = null;
+  const { card, liste, bewegt, start } = zug; zug = null;
   card.classList.remove("zieht"); card.style.transform = "";
-  if (!bewegt) return;
-  const bid = card.dataset.b, id = card.dataset.id;
+  const ids = zugKinder(liste).map((c) => c.dataset.id);
+  if (!bewegt || ids.join() === start) return;
+  if (liste.dataset.zug === "punkte") {
+    const bid = card.dataset.b, id = card.dataset.id;
+    const absteigend = !S.umgekehrt;
+    const D = eintraegeVon(bid).filter((x) => x.id !== id); if (!absteigend) D.reverse();
+    zwischenSetzen(bid, id, D, card.previousElementSibling?.dataset?.id, card.nextElementSibling?.dataset?.id, absteigend);
+    changed();
+  } else liste.dispatchEvent(new CustomEvent("umsortiert", { detail: { ids, id: card.dataset.id } }));
+};
+// Neuen Sortierwert zwischen die Nachbarn legen (D = Anzeige-Reihenfolge ohne den verschobenen Punkt)
+function zwischenSetzen(bid, id, D, vor, nach, absteigend) {
   const e = (S.eintraege[bid] || []).find((x) => x.id === id); if (!e) return;
-  // Anzeige-Reihenfolge aller Punkte (ohne den verschobenen)
-  const absteigend = !S.umgekehrt;
-  const D = eintraegeVon(bid).filter((x) => x.id !== id); if (!absteigend) D.reverse();
-  const vor = card.previousElementSibling?.dataset?.id, nach = card.nextElementSibling?.dataset?.id;
-  let i = vor ? D.findIndex((x) => x.id === vor) + 1 : nach ? D.findIndex((x) => x.id === nach) : -1;
-  if (i < 0) { render(); return; }
+  const i = vor ? D.findIndex((x) => x.id === vor) + 1 : nach ? D.findIndex((x) => x.id === nach) : -1;
+  if (i < 0) return;
   const kp = D[i - 1] ? reihe(D[i - 1]) : null, kn = D[i] ? reihe(D[i]) : null;
   const schritt = absteigend ? -60000 : 60000;
   e.pos = kp != null && kn != null ? (kp + kn) / 2 : kp != null ? kp + schritt : kn != null ? kn - schritt : reihe(e);
-  upsert(S.eintraege[bid], e); changed();
-};
+  upsert(S.eintraege[bid], e);
+}
 document.addEventListener("pointerup", zugEnde, true);
 document.addEventListener("pointercancel", zugEnde, true);
-// Tippen auf das Kästchen öffnet den Punkt nicht
 document.addEventListener("click", (ev) => { if (ev.target.closest("[data-griff]")) { ev.stopImmediatePropagation(); ev.preventDefault(); } }, true);
 
 // ---------- Lange drücken: Löschen ----------
@@ -1681,6 +1787,7 @@ document.addEventListener("click", async (ev) => {
     case "protokoll-neu": sheetProtokoll(id); break;
     case "protokoll-go": try { await protokollErstellen(id); } catch (e) { console.error(e); toast("Protokoll: " + (e.message || e)); } break;
     case "protokoll-ansehen": try { await protokollAnsehen(t.dataset.b, id); } catch (e) { toast("Ansehen: " + (e.message || e)); } break;
+    case "protokoll-bearbeiten": sheetProtokollBearbeiten(t.dataset.b, id); break;
     case "protokoll-neu-erstellen": try { await protokollNeuErstellen(t.dataset.b, id); } catch (e) { console.error(e); toast("Neu erstellen: " + (e.message || e)); } break;
     case "protokoll-senden": try { await protokollSenden(t.dataset.b, id); } catch (e) { toast("Senden: " + (e.message || e)); } break;
     case "ki-test": {
