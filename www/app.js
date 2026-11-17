@@ -176,14 +176,24 @@ function fotoImg(bid, name, cls = "") {
   if (S.lokal[name]) return `<img class="${cls}" src="${esc(fileSrc(S.lokal[name]))}" alt="" loading="lazy">`;
   return `<img class="${cls}" data-remote="${esc(bid + "|" + name)}" alt="" src="data:image/gif;base64,R0lGODlhAQABAAAAACw=">`;
 }
-async function ensureLocal(bid, name, ordner = "Fotos") {
-  if (S.lokal[name]) return S.lokal[name];
+// stand: Zeitpunkt der letzten Fassung (bei Protokollen). Ist die lokale Kopie älter, neu aus Dropbox holen.
+async function ensureLocal(bid, name, ordner = "Fotos", stand) {
+  S.lokalStand = S.lokalStand || {};
+  const aktuell = !stand || (S.lokalStand[name] || 0) >= stand;
+  if (S.lokal[name] && (aktuell || S.queue.some((q) => q.name === name))) return S.lokal[name];
   const b = baustelle(bid);
+  if (S.lokal[name]) {
+    // ältere Kopie: nur ersetzen, wenn die neue Fassung schon in Dropbox liegt
+    try {
+      const m = await Dropbox.rpc("files/get_metadata", { path: bPath(b, "/" + ordner + "/" + name) });
+      if (Date.parse(m.server_modified) < stand - 120000) { toast("Die neue Fassung ist noch nicht in Dropbox – auf dem anderen Gerät die App kurz öffnen (synchronisieren)"); return S.lokal[name]; }
+    } catch { return S.lokal[name]; }
+  }
   const bl = await Dropbox.download(bPath(b, "/" + ordner + "/" + name));
-  if (!bl) throw new Error("Datei nicht gefunden: " + name);
+  if (!bl) { if (S.lokal[name]) return S.lokal[name]; throw new Error("Datei nicht gefunden: " + name); }
   const rel = (ordner === "Fotos" ? "fotos/" : "pdf/") + name;
   await Filesystem.writeFile({ path: rel, directory: DATA, data: await blobToB64(bl) });
-  S.lokal[name] = rel; persist();
+  S.lokal[name] = rel; if (stand) S.lokalStand[name] = stand; persist();
   return rel;
 }
 const blobToB64 = (bl) => new Promise((ok, no) => { const r = new FileReader(); r.onload = () => ok(String(r.result).split(",")[1]); r.onerror = no; r.readAsDataURL(bl); });
@@ -931,7 +941,7 @@ async function protokollErstellen(bid) {
   const nr = (protokolleVon(bid)[0]?.nr || 0) + 1;
   const punkte = protokollPunkte(bid);
   const prot = { id: newId("pr"), nr, datum: document.getElementById("p-datum").value || today(), anwesende: [...V.protSel],
-    sonstige: document.getElementById("p-sonst").value.trim(), wetter: document.getElementById("p-wetter").value.trim(), verfasser: S.meinName || S.auth?.name || "", erstellt: Date.now(), punkte: [] };
+    sonstige: document.getElementById("p-sonst").value.trim(), wetter: document.getElementById("p-wetter").value.trim(), verfasser: S.meinName || S.auth?.name || "", erstellt: Date.now(), stand: Date.now(), punkte: [] };
   closeSheet(); toast("Protokoll wird erstellt …");
   let lauf = 0;
   for (const e of punkte) {
@@ -944,7 +954,7 @@ async function protokollErstellen(bid) {
   prot.datei = name;
   const rel = "pdf/" + name;
   await Filesystem.writeFile({ path: rel, directory: DATA, data: await pdfProtokoll(b, prot, punkte) });
-  S.lokal[name] = rel;
+  S.lokal[name] = rel; (S.lokalStand = S.lokalStand || {})[name] = prot.stand;
   await protokollWord(b, prot, punkte, true);
   S.protokolle[bid] = S.protokolle[bid] || [];
   upsert(S.protokolle[bid], prot);
@@ -963,14 +973,22 @@ function protokollFertigSheet(bid, prot) {
 }
 async function protokollAnsehen(bid, pid) {
   const prot = (S.protokolle[bid] || []).find((p) => p.id === pid);
-  const rel = await ensureLocal(bid, prot.datei, "Protokolle");
-  if (!NATIVE) { window.open(fileSrc(rel)); return; }
-  await Mail.open({ path: absPath(rel), mime: "application/pdf" });
+  const rel = await ensureLocal(bid, prot.datei, "Protokolle", prot.stand);
+  if (!NATIVE) { window.open(fileSrc(rel) + "?v=" + (prot.stand || 0)); return; }
+  let pfad = rel;
+  if (!PC) {   // Handy-Betrachter merken sich Dateien – darum jede Fassung unter eigenem Pfad zeigen
+    try { await Filesystem.rmdir({ path: "ansicht", directory: DATA, recursive: true }); } catch {}
+    pfad = `ansicht/${prot.stand || Date.now()}/${prot.datei}`;
+    await Filesystem.mkdir({ path: pfad.replace(/\/[^/]+$/, ""), directory: DATA, recursive: true });
+    await Filesystem.copy({ from: rel, to: pfad, directory: DATA, toDirectory: DATA });
+  }
+  await Mail.open({ path: absPath(pfad), mime: "application/pdf" });
 }
 async function protokollNeuErstellen(bid, pid) {
   const b = baustelle(bid);
   const prot = { ...(S.protokolle[bid] || []).find((p) => p.id === pid) };
   if (S.meinName) prot.verfasser = S.meinName;   // geänderten Namen übernehmen
+  prot.stand = Date.now();
   const punkte = prot.punkte.map((id) => (S.eintraege[bid] || []).find((e) => e.id === id)).filter((e) => e && !e.geloescht);
   // neue Punkte seit dem Erstellen dieses Protokolls ebenfalls aufnehmen
   let lauf = punkte.filter((e) => e.protokollNr === prot.nr).length;
@@ -979,7 +997,7 @@ async function protokollNeuErstellen(bid, pid) {
   if (einst().fotos !== "keine") for (const e of punkte) for (const f of e.fotos || []) { try { await ensureLocal(bid, f); } catch {} }
   const rel = "pdf/" + prot.datei;
   await Filesystem.writeFile({ path: rel, directory: DATA, data: await pdfProtokoll(b, prot, punkte) });
-  S.lokal[prot.datei] = rel;
+  S.lokal[prot.datei] = rel; (S.lokalStand = S.lokalStand || {})[prot.datei] = prot.stand;
   await protokollWord(b, prot, punkte, !prot.wordDatei);
   upsert(S.protokolle[bid], prot);
   S.queue = S.queue.filter((q) => q.name !== prot.datei);
@@ -989,7 +1007,7 @@ async function protokollNeuErstellen(bid, pid) {
 }
 async function protokollSenden(bid, pid) {
   const b = baustelle(bid); const prot = (S.protokolle[bid] || []).find((p) => p.id === pid);
-  const rel = await ensureLocal(bid, prot.datei, "Protokolle");
+  const rel = await ensureLocal(bid, prot.datei, "Protokolle", prot.stand);
   const addrs = beteiligte(b).map(firstMail).filter(Boolean);
   const it = einst().sprache === "Italienisch"; const du = einst().anrede === "Du";
   const offen = (prot.punkte || []).map((id) => (S.eintraege[bid] || []).find((e) => e.id === id)).filter((e) => e && e.status !== "erledigt").length;
